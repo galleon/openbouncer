@@ -1043,12 +1043,132 @@ models:
     api_key_env: UPSTREAM_OPENROUTER_API_KEY
     capabilities: [chat, vision]
     concurrency_limit: 4
+
+  # Local vLLM containers on this box (e.g. a DGX host) -- one container per
+  # model, each running vLLM's OpenAI-compatible server. Like Ollama, vLLM
+  # doesn't check the API key unless the container is started with
+  # --api-key, so api_key_env just needs to resolve to some non-empty value:
+  # `export UPSTREAM_VLLM_API_KEY=local`.
+  - id: local/bge-m3
+    upstream_model: BAAI/bge-m3
+    base_url: http://vllm-bge-m3:8000/v1
+    api_key_env: UPSTREAM_VLLM_API_KEY
+    capabilities: [embeddings]
+    concurrency_limit: 8
+  - id: local/gemma4-nvfp4
+    upstream_model: nvidia/Gemma-4-26B-A4B-NVFP4
+    base_url: http://vllm-gemma4:8000/v1
+    api_key_env: UPSTREAM_VLLM_API_KEY
+    capabilities: [chat]
+    concurrency_limit: 4
 ```
 
-Both are already in the bundled `config/models.yaml` as working examples.
+All four are already in the bundled `config/models.yaml` as working examples.
 Whatever you add here also needs to appear in at least one API key's
 `allowed_models` (see [Authentication](#authentication)) before any client
 can actually request it.
+
+The `local/*` pair above assumes vLLM is running as the `vllm-bge-m3` /
+`vllm-gemma4` services in the bundled `docker-compose.yml` (see next
+section) -- if the gateway isn't running inside that same compose network,
+swap those hostnames for `localhost:8001` / `localhost:8002` (the
+host-mapped ports) instead.
+
+### Serving local models with vLLM (DGX Spark)
+
+`docker-compose.yml` includes two optional services, disabled by default,
+that run vLLM's OpenAI-compatible server for local serving on a
+[DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/):
+`vllm-bge-m3` (BGE-M3 embeddings) and `vllm-gemma4` (Gemma-4 26B, NVFP4
+quantized, chat). Start them with:
+
+```bash
+docker compose --profile vllm up --build
+```
+
+This requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host. DGX Spark is a single GB10 chip -- one Blackwell GPU (`sm_121`),
+ARM64 Grace CPU, 128GB of memory unified across both -- not a multi-GPU DGX
+server, so both services intentionally target GPU `0` and share that one
+128GB pool with the host OS; `--gpu-memory-utilization` on each is set
+conservatively (`0.1` / `0.5`) rather than vLLM's `0.9` default for that
+reason, and running both containers under load at the same time means they
+time-share the one GPU (no MIG/MPS here).
+
+**Image compatibility matters here.** Stock `vllm/vllm-openai:latest` does
+not run on GB10: its CUDA 12.8 base is one minor version below what
+`sm_121`'s FlashInfer JIT compilation needs (12.9+), and the engine crashes
+sizing the KV cache. The compose file defaults `VLLM_IMAGE` to NVIDIA's NGC
+image, `nvcr.io/nvidia/vllm:26.06-py3`, which does support GB10 -- override
+the tag in a `.env` file to match whatever build you have pulled locally:
+
+```bash
+VLLM_IMAGE=nvcr.io/nvidia/vllm:26.06-py3
+HF_TOKEN=hf_...   # only needed if a model repo is gated
+```
+
+Note NGC's `nvcr.io/nvidia/vllm` images use a pass-through entrypoint, so
+each service's `command:` spells out the full `vllm serve <model> ...`
+invocation -- if you swap `VLLM_IMAGE` for the community `vllm/vllm-openai`
+image instead, whose entrypoint already *is* `vllm serve`, drop the leading
+`vllm serve` from `command:` or the container will try to run `vllm serve
+vllm serve ...`.
+
+NVFP4 also needs a vLLM build with NVFP4/ModelOpt support; adjust or drop the
+`--quantization` flag in `vllm-gemma4`'s `command:` to match what your
+installed vLLM version expects. Both containers persist downloaded weights
+in a shared `huggingface-cache` Docker volume, so a restart doesn't
+re-download them.
+
+### Exposing the gateway externally
+
+`docker-compose.yml` includes a `caddy` service that TLS-terminates in front
+of `gateway`. It's always on (no profile) since it's meant to be the *only*
+externally-reachable service -- `gateway`, `vllm-bge-m3`, and `vllm-gemma4`
+all bind to `127.0.0.1` only, so nothing else on the host is reachable over
+the LAN or a public interface even if you forward more ports than intended.
+
+Caddy is built from `Dockerfile.caddy` (not the stock `caddy:2-alpine`
+image) with the `caddy-dns/gandi` plugin baked in, so it can get a real
+Let's Encrypt certificate via a **DNS-01** challenge -- proving domain
+ownership through a DNS TXT record instead of a port-80/443 HTTP check. This
+matters if ports 80/443 on your network are already claimed by something
+else (e.g. a second DGX box sharing the same router): DNS-01 works on any
+port, unlike the standard HTTP-01/TLS-ALPN-01 challenges, which are
+hardcoded to 80/443 on the public IP and can't be redirected. The compose
+file maps Caddy to external port `8443`.
+
+Required in a `.env` file:
+
+```bash
+DOMAIN=your-subdomain.example.com   # must be a domain/subdomain on Gandi DNS
+GANDI_API_TOKEN=...                 # Gandi account -> Personal access tokens, DNS record permission for the domain
+```
+
+Both are required -- `docker compose up` fails fast with a clear error if
+either is missing, rather than starting Caddy in a broken state.
+
+You also need to, outside this repo:
+
+1. Point `DOMAIN`'s A/AAAA record at your network's public IP, via Gandi's
+   DNS console. If your ISP hands out a dynamic IP (true for most residential
+   Free/Freebox connections), keep this updated with dynamic DNS rather than
+   a static record.
+2. Forward external port `8443` to this host's port `8443` in your router's
+   admin UI (for a Freebox: `mafreebox.freebox.fr` -> *Paramètres de la
+   Freebox* -> *Mode avancé* -> port redirections).
+
+Once both are in place, `https://your-subdomain.example.com:8443` reaches
+the gateway with a browser-trusted certificate that Caddy renews
+automatically. `caddy-data`/`caddy-config` Docker volumes persist the
+certificate and Caddy's state across restarts.
+
+If you don't need a public, browser-trusted certificate (e.g. testing from
+the host itself, or clients that can be configured to trust a custom CA),
+you can skip all of the above: set `DOMAIN=localhost` in `.env` (still
+required, but no DNS/Gandi setup needed for this value) and remove the
+`tls { dns gandi ... }` block from `Caddyfile`, and Caddy falls back to its
+own local CA instead of Let's Encrypt.
 
 ### Embeddings
 

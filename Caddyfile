@@ -1,0 +1,6 @@
+{$DOMAIN} {
+	tls {
+		dns gandi {env.GANDI_API_TOKEN}
+	}
+	reverse_proxy gateway:8000
+}

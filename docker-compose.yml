@@ -3,7 +3,12 @@ services:
     build: .
     image: openbouncer:latest
     ports:
-      - "${GATEWAY_PORT:-8000}:8000"
+      # Loopback-only: the `caddy` service below is the intended path in from
+      # outside the host (TLS + the only port meant to be forwarded/exposed
+      # externally). Bound to 127.0.0.1 so this raw HTTP port isn't reachable
+      # over the LAN or a public interface, just for local debugging
+      # (`curl http://localhost:8000/...` from the host itself still works).
+      - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
     environment:
       # Model registry: which of the 3 allowed public models are exposed
       # and how to reach their upstream. Defaults to the bundled
@@ -17,11 +22,18 @@ services:
       # profile below for a docker-compose-managed example).
       NEMO_GUARDRAILS_BASE_URL: ${NEMO_GUARDRAILS_BASE_URL:-http://localhost:8000/v1}
 
-      # Upstream model API key(s). All 3 bundled models share this one
+      # Upstream model API key(s). All 3 bundled NVIDIA models share this one
       # (see config/models.yaml's api_key_env) since they're all served from
       # the same NVIDIA endpoint; add more UPSTREAM_*_API_KEY variables here
       # if you point config/models.yaml at additional providers.
       UPSTREAM_NVIDIA_API_KEY: ${UPSTREAM_NVIDIA_API_KEY:-}
+
+      # Only used by the local/bge-m3 and local/gemma4-nvfp4 entries in
+      # config/models.yaml (see the vllm-bge-m3 / vllm-gemma4 services
+      # below). vLLM doesn't check the API key at all unless the container
+      # is started with --api-key, so this just needs to resolve to *some*
+      # non-empty value.
+      UPSTREAM_VLLM_API_KEY: ${UPSTREAM_VLLM_API_KEY:-local}
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -37,6 +49,42 @@ services:
       - ./guardrails_configs:/app/guardrails_configs:ro
     restart: unless-stopped
 
+  # TLS-terminating reverse proxy in front of `gateway` -- the only service
+  # meant to be reachable from outside the host (e.g. forwarded through a
+  # router/Freebox). Proxies to gateway:8000 over the internal docker
+  # network, so gateway's own port binding above can stay loopback-only.
+  #
+  # Built from Dockerfile.caddy (not the stock caddy:2-alpine image) because
+  # it bundles the caddy-dns/gandi plugin -- needed since ports 80/443 on
+  # this network are already claimed by another box, so Caddy can't use the
+  # normal HTTP-01/TLS-ALPN-01 ACME challenges (those are hardcoded to
+  # ports 80/443 on the public IP, non-negotiable). DNS-01 instead proves
+  # domain ownership via a TXT record through Gandi's API, so it works on
+  # any port -- here mapped to external 8443.
+  #
+  # Required in a .env file:
+  #   DOMAIN=your-subdomain.example.com   # must be on Gandi DNS
+  #   GANDI_API_TOKEN=...                 # Gandi account -> Personal access tokens, DNS record permission for the domain
+  # You still need to: point DOMAIN's A/AAAA record at this network's public
+  # IP (ideally via dynamic DNS, since Free's IPv4 isn't static), and forward
+  # external port 8443 -> this host's 8443 in Freebox OS.
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    ports:
+      - "8443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env to this box's public hostname, e.g. spark1.example.com}
+      GANDI_API_TOKEN: ${GANDI_API_TOKEN:?set GANDI_API_TOKEN in .env -- Gandi account -> Personal access tokens}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
   # Optional: distributed rate limiting shared across multiple gateway
   # replicas, instead of OpenBouncer's default per-process in-memory
   # limiter. Disabled by default -- start it explicitly with:
@@ -50,5 +98,97 @@ services:
       - redis-data:/data
     restart: unless-stopped
 
+  # Optional: local model serving on a DGX Spark via vLLM's OpenAI-compatible
+  # server, matching the local/bge-m3 and local/gemma4-nvfp4 entries in
+  # config/models.yaml. Disabled by default -- start explicitly with:
+  #   docker compose --profile vllm up
+  #
+  # DGX Spark is a single GB10 chip (one Blackwell GPU, sm_121, ARM64 Grace
+  # CPU, 128GB unified memory shared by CPU+GPU) -- NOT a multi-GPU DGX
+  # server, so both services below intentionally target the same GPU 0.
+  # Requires the NVIDIA Container Toolkit on the host.
+  #
+  # IMPORTANT: stock `vllm/vllm-openai:latest` does not run on GB10 -- its
+  # CUDA 12.8 base is one minor version below what sm_121's FlashInfer JIT
+  # needs (12.9+) and the engine crashes sizing the KV cache. VLLM_IMAGE
+  # below defaults to NVIDIA's NGC vLLM image, which does support GB10 --
+  # override the tag/pull a newer one in a .env file if needed:
+  #   VLLM_IMAGE=nvcr.io/nvidia/vllm:26.06-py3
+  #   HF_TOKEN=hf_...   # only needed if the model repo is gated
+  #
+  # NGC's nvcr.io/nvidia/vllm images use a pass-through entrypoint, so
+  # `command:` below spells out the full `vllm serve <model> ...` -- unlike
+  # the community vllm/vllm-openai image, whose entrypoint already *is*
+  # `vllm serve` (drop the leading `vllm serve` from command: if you switch
+  # to that image instead).
+  #
+  # gpu-memory-utilization on both services is kept low/moderate (rather
+  # than vLLM's 0.9 default, which is known to OOM on DGX Spark even for a
+  # single model) since it's a fraction of the *same* 128GB pool the host OS
+  # and Grace CPU also draw from, not dedicated VRAM -- tune to taste.
+  # Running both containers concurrently means they time-share the one GPU
+  # (no MIG/MPS partitioning on this chip); fine for an embedding model +
+  # chat model pair, but expect contention under simultaneous load.
+  vllm-bge-m3:
+    image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:26.06-py3}
+    profiles: ["vllm"]
+    command: >
+      vllm serve BAAI/bge-m3
+      --served-model-name BAAI/bge-m3
+      --runner pooling
+      --port 8000
+      --gpu-memory-utilization 0.1
+    ports:
+      # Loopback-only -- vLLM ignores the bearer token unless started with
+      # --api-key (not set here), so this must never be reachable from
+      # outside the host. See the caddy/gateway note above.
+      - "127.0.0.1:8001:8000"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # NVFP4 needs a vLLM build with NVFP4/ModelOpt support (see VLLM_IMAGE
+  # note above). Adjust --quantization (or drop it to rely on autodetection
+  # from the checkpoint's quant config) to match what your installed vLLM
+  # version expects.
+  vllm-gemma4:
+    image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:26.06-py3}
+    profiles: ["vllm"]
+    command: >
+      vllm serve nvidia/Gemma-4-26B-A4B-NVFP4
+      --served-model-name nvidia/Gemma-4-26B-A4B-NVFP4
+      --quantization modelopt
+      --port 8000
+      --gpu-memory-utilization 0.5
+    ports:
+      # Loopback-only -- same reasoning as vllm-bge-m3 above.
+      - "127.0.0.1:8002:8000"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
 volumes:
   redis-data:
+  huggingface-cache:
+  caddy-data:
+  caddy-config:
