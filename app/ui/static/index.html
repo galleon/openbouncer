@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenBouncer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>OpenBouncer</h1>
+      <label class="api-key-field">
+        <span>API key</span>
+        <input
+          type="password"
+          id="api-key"
+          placeholder="sk-..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </label>
+    </header>
+
+    <main>
+      <form id="chat-form">
+        <div class="row">
+          <label class="field">
+            <span>Model</span>
+            <select id="model" required></select>
+          </label>
+
+          <label class="checkbox-field">
+            <input type="checkbox" id="stream" checked />
+            <span>Stream response</span>
+          </label>
+        </div>
+
+        <fieldset id="guardrails-fieldset">
+          <legend>
+            <label class="checkbox-field">
+              <input type="checkbox" id="guardrails-enabled" />
+              <span>Enable guardrails</span>
+            </label>
+          </legend>
+
+          <div class="row">
+            <label class="field">
+              <span>Guardrails config</span>
+              <select id="guardrails-config" disabled></select>
+            </label>
+
+            <label class="field">
+              <span>Preset</span>
+              <select id="preset" disabled></select>
+            </label>
+          </div>
+        </fieldset>
+
+        <label class="field">
+          <span>Message</span>
+          <textarea
+            id="prompt"
+            rows="5"
+            placeholder="Type a message..."
+            required
+          ></textarea>
+        </label>
+
+        <label class="field">
+          <span>Image URL (optional)</span>
+          <input
+            type="url"
+            id="image-url"
+            placeholder="https://example.com/cat.png"
+          />
+        </label>
+
+        <button type="submit" id="send">Send</button>
+      </form>
+
+      <section id="response-section">
+        <div class="response-header">
+          <h2>Response</h2>
+          <span id="status" role="status"></span>
+        </div>
+        <pre id="response"></pre>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

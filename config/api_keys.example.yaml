@@ -1,0 +1,20 @@
+# Template for API key configuration. This file is NOT loaded automatically
+# -- OpenBouncer only reads config/api_keys.yaml (or the path/content given
+# by OPENBOUNCER_API_KEYS_CONFIG / OPENBOUNCER_API_KEYS_YAML). Copy this file
+# to config/api_keys.yaml (or point OPENBOUNCER_API_KEYS_CONFIG at your own
+# copy) and replace the example key below with your own.
+#
+# Generate a new key + its hash with:
+#   python -c "import secrets, hashlib; k = 'sk-' + secrets.token_urlsafe(32); print('key:', k); print('key_hash:', hashlib.sha256(k.encode()).hexdigest())"
+# Store the raw key ("key:") securely and give it to the client; only the
+# hash ("key_hash:") is ever written to this file or held in memory.
+
+keys:
+  # Example only -- the key_hash below is sha256("sk-REPLACE-ME-WITH-A-REAL-RANDOM-SECRET").
+  # Do not use it: generate your own with the command above.
+  - id: example-key
+    key_hash: 58cf97b4e1b602e3b1e791c0f52dc11d86cb46c81bba6120ce09074c9a3f737e
+    allowed_models:
+      - nvidia/qwen3.6-nvfp4
+      - nvidia/gemme4-nvfp4
+    requests_per_minute: 60

@@ -1,0 +1,54 @@
+services:
+  gateway:
+    build: .
+    image: openbouncer:latest
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    environment:
+      # Model registry: which of the 3 allowed public models are exposed
+      # and how to reach their upstream. Defaults to the bundled
+      # config/models.yaml (mounted below) if unset.
+      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-}
+
+      # Guardrails: disabled | nemo_library | nemo_microservice
+      GUARDRAILS_MODE: ${GUARDRAILS_MODE:-disabled}
+      # Only used when GUARDRAILS_MODE=nemo_microservice -- base URL of a
+      # separately-run NeMo Guardrails Microservice (see the `guardrails`
+      # profile below for a docker-compose-managed example).
+      NEMO_GUARDRAILS_BASE_URL: ${NEMO_GUARDRAILS_BASE_URL:-http://localhost:8000/v1}
+
+      # Upstream model API key(s). All 3 bundled models share this one
+      # (see config/models.yaml's api_key_env) since they're all served from
+      # the same NVIDIA endpoint; add more UPSTREAM_*_API_KEY variables here
+      # if you point config/models.yaml at additional providers.
+      UPSTREAM_NVIDIA_API_KEY: ${UPSTREAM_NVIDIA_API_KEY:-}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # API key auth (see README's Authentication section) -- points at the
+      # file bind-mounted below. Left unset, every request gets 401.
+      OPENBOUNCER_API_KEYS_CONFIG: /app/config/api_keys.yaml
+
+      # Only used if the `redis` profile is enabled below; leave unset to
+      # use OpenBouncer's built-in in-memory rate limiter instead.
+      REDIS_URL: ${REDIS_URL:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./guardrails_configs:/app/guardrails_configs:ro
+    restart: unless-stopped
+
+  # Optional: distributed rate limiting shared across multiple gateway
+  # replicas, instead of OpenBouncer's default per-process in-memory
+  # limiter. Disabled by default -- start it explicitly with:
+  #   docker compose --profile redis up
+  # and set REDIS_URL=redis://redis:6379/0 (e.g. in a .env file) so the
+  # gateway actually uses it.
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

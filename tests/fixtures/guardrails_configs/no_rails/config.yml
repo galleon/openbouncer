@@ -1,0 +1,4 @@
+models: []
+instructions:
+  - type: general
+    content: "This is a test bot with no rails configured."

@@ -1,0 +1,66 @@
+models:
+  - id: nvidia/qwen3.6-nvfp4
+    upstream_model: nvidia/Qwen3.6-27B-NVFP4
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: UPSTREAM_NVIDIA_API_KEY
+    capabilities:
+      - chat
+    concurrency_limit: 8
+
+  - id: nvidia/gemme4-nvfp4
+    upstream_model: nvidia/Gemma-4-26B-A4B-NVFP4
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: UPSTREAM_NVIDIA_API_KEY
+    capabilities:
+      - chat
+    concurrency_limit: 8
+
+  - id: nvidia/nemotron-vision
+    upstream_model: nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-NVFP4-QAD
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: UPSTREAM_NVIDIA_API_KEY
+    capabilities:
+      - chat
+      - vision
+    concurrency_limit: 4
+
+  # Example: a locally-running Ollama server (any OpenAI-compatible endpoint
+  # works here, not just cloud APIs). Ollama doesn't check the API key at
+  # all, so api_key_env just needs to resolve to *some* non-empty value --
+  # e.g. `export UPSTREAM_OLLAMA_API_KEY=ollama`. `upstream_model` must match
+  # a model you've pulled locally (`ollama pull llama3.2`). If the gateway
+  # itself runs in Docker, use base_url http://host.docker.internal:11434/v1
+  # instead of localhost to reach a server running on the host.
+  - id: ollama/llama3.2
+    upstream_model: llama3.2
+    base_url: http://localhost:11434/v1
+    api_key_env: UPSTREAM_OLLAMA_API_KEY
+    capabilities:
+      - chat
+    concurrency_limit: 4
+
+  # Example: OpenRouter (https://openrouter.ai), a hosted proxy in front of
+  # many providers' models. Needs a real API key from openrouter.ai --
+  # `export UPSTREAM_OPENROUTER_API_KEY=sk-or-...`. `upstream_model` uses
+  # OpenRouter's own "provider/model" naming, distinct from our own `id`.
+  - id: openrouter/claude-3.5-sonnet
+    upstream_model: anthropic/claude-3.5-sonnet
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: UPSTREAM_OPENROUTER_API_KEY
+    capabilities:
+      - chat
+      - vision
+    concurrency_limit: 4
+
+  # Example: an embedding model, also served locally via Ollama
+  # (`ollama pull nomic-embed-text`). /v1/embeddings only accepts models
+  # whose capabilities include "embeddings" -- a chat-only model like the
+  # ones above will be rejected with model_does_not_support_embeddings.
+  # Embeddings never go through guardrails regardless of GUARDRAILS_MODE.
+  - id: ollama/nomic-embed-text
+    upstream_model: nomic-embed-text
+    base_url: http://localhost:11434/v1
+    api_key_env: UPSTREAM_OLLAMA_API_KEY
+    capabilities:
+      - embeddings
+    concurrency_limit: 4

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Real API key config (contains key hashes) -- keep only the .example.yaml template tracked.
+/config/api_keys.yaml
+
+# Local Claude Code session/tool settings, not project source.
+/.claude/

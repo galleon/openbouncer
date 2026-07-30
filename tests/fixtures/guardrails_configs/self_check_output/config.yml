@@ -1,0 +1,21 @@
+models: []
+
+rails:
+  output:
+    flows:
+      - self check output
+
+prompts:
+  - task: self_check_output
+    content: |
+      Your task is to check if the bot message below complies with the company policy.
+
+      Company policy for the bot:
+      - messages should not contain any explicit content, even if just a few words
+      - messages should not contain abusive language or offensive content, even if just a few words
+      - messages should not contain any harmful content
+
+      Bot message: "{{ bot_response }}"
+
+      Question: Should the message be blocked (Yes or No)?
+      Answer:

@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+.git
+.gitignore
+tests/
+README.md
+config/api_keys.yaml
