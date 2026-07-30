@@ -1,5 +1,7 @@
 # OpenBouncer
 
+[![Tests](https://github.com/galleon/openbouncer/actions/workflows/tests.yml/badge.svg)](https://github.com/galleon/openbouncer/actions/workflows/tests.yml)
+
 An OpenAI-compatible LLM gateway with pluggable guardrails.
 
 ## Quick start
