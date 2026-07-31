@@ -8,7 +8,7 @@ from app.api.routes.chat import _relay_stream
 from app.schemas.chat import ChatCompletionRequest
 from app.upstream.client import UpstreamClient
 
-BASE_URL = "https://integrate.api.nvidia.com/v1"
+BASE_URL = "http://vllm-gemma4:8000/v1"
 CHAT_URL = f"{BASE_URL}/chat/completions"
 
 
@@ -38,7 +38,7 @@ def _sse_body(*data_values: str) -> bytes:
 
 @pytest.fixture(autouse=True)
 def _api_key(monkeypatch):
-    monkeypatch.setenv("UPSTREAM_NVIDIA_API_KEY", "test-key")
+    monkeypatch.setenv("UPSTREAM_VLLM_API_KEY", "test-key")
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_stream_relays_valid_frames_and_ends_with_done(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -80,7 +80,7 @@ async def test_stream_skips_malformed_data_frames(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -102,7 +102,7 @@ async def test_stream_falls_back_to_done_when_upstream_omits_it(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -133,7 +133,7 @@ async def test_stream_error_before_first_token_returns_json_error(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -158,7 +158,7 @@ async def test_stream_error_after_start_emits_sse_error_then_done(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -193,12 +193,12 @@ async def test_stream_rejects_unregistered_model(client):
 
 @pytest.mark.asyncio
 async def test_stream_missing_api_key_returns_json_error(client, monkeypatch):
-    monkeypatch.delenv("UPSTREAM_NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("UPSTREAM_VLLM_API_KEY", raising=False)
 
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },

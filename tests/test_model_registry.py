@@ -159,12 +159,8 @@ class TestLoadingSources:
         registry = load_model_registry()
         ids = {entry.id for entry in registry.all()}
         assert ids == {
-            "nvidia/qwen3.6-nvfp4",
-            "nvidia/gemme4-nvfp4",
-            "nvidia/nemotron-vision",
-            "ollama/llama3.2",
-            "openrouter/claude-3.5-sonnet",
-            "ollama/nomic-embed-text",
+            "local/bge-m3",
+            "local/gemma4-nvfp4",
         }
 
     def test_default_config_path_exists(self):

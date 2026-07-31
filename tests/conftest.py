@@ -19,10 +19,8 @@ keys:
   - id: test-key
     key_hash: {TEST_API_KEY_HASH}
     allowed_models:
-      - nvidia/qwen3.6-nvfp4
-      - nvidia/gemme4-nvfp4
-      - nvidia/nemotron-vision
-      - ollama/nomic-embed-text
+      - local/gemma4-nvfp4
+      - local/bge-m3
     requests_per_minute: 1000000
 """
 
@@ -36,7 +34,7 @@ RESTRICTED_STORE_YAML = f"""
 keys:
   - id: restricted-key
     key_hash: {RESTRICTED_HASH}
-    allowed_models: [nvidia/qwen3.6-nvfp4]
+    allowed_models: [local/gemma4-nvfp4]
     requests_per_minute: 1000000
 """
 
@@ -46,7 +44,7 @@ LOW_LIMIT_STORE_YAML = f"""
 keys:
   - id: low-limit-key
     key_hash: {LOW_LIMIT_HASH}
-    allowed_models: [nvidia/qwen3.6-nvfp4]
+    allowed_models: [local/gemma4-nvfp4]
     requests_per_minute: 2
 """
 

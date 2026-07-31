@@ -7,10 +7,10 @@ from app.main import app
 from tests.conftest import LOW_LIMIT_HASH, LOW_LIMIT_KEY, RESTRICTED_HASH, RESTRICTED_KEY
 
 CHAT_BODY = {
-    "model": "nvidia/qwen3.6-nvfp4",
+    "model": "local/gemma4-nvfp4",
     "messages": [{"role": "user", "content": "hi"}],
 }
-EMBEDDINGS_BODY = {"model": "nvidia/qwen3.6-nvfp4", "input": "hi"}
+EMBEDDINGS_BODY = {"model": "local/gemma4-nvfp4", "input": "hi"}
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,9 @@ async def test_forbidden_model_rejected_on_chat_completions(restricted_client):
     response = await restricted_client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/nemotron-vision",
+            # local/bge-m3 exists in the registry but isn't in
+            # restricted_client's allowed_models (see conftest.py).
+            "model": "local/bge-m3",
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
@@ -78,7 +80,9 @@ async def test_forbidden_model_rejected_on_chat_completions(restricted_client):
 async def test_forbidden_model_rejected_on_embeddings(restricted_client):
     response = await restricted_client.post(
         "/v1/embeddings",
-        json={"model": "nvidia/nemotron-vision", "input": "hi"},
+        # local/bge-m3 exists in the registry but isn't in restricted_client's
+        # allowed_models (see conftest.py).
+        json={"model": "local/bge-m3", "input": "hi"},
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "model_not_allowed"
@@ -95,7 +99,7 @@ async def test_models_endpoint_filtered_to_allowed_models(restricted_client):
     response = await restricted_client.get("/v1/models")
     assert response.status_code == 200
     ids = {item["id"] for item in response.json()["data"]}
-    assert ids == {"nvidia/qwen3.6-nvfp4"}
+    assert ids == {"local/gemma4-nvfp4"}
 
 
 @pytest.mark.asyncio
@@ -122,11 +126,11 @@ async def test_rate_limit_is_scoped_per_key():
 keys:
   - id: low-limit-key
     key_hash: {LOW_LIMIT_HASH}
-    allowed_models: [nvidia/qwen3.6-nvfp4]
+    allowed_models: [local/gemma4-nvfp4]
     requests_per_minute: 2
   - id: restricted-key
     key_hash: {RESTRICTED_HASH}
-    allowed_models: [nvidia/qwen3.6-nvfp4]
+    allowed_models: [local/gemma4-nvfp4]
     requests_per_minute: 1000000
 """
     store = parse_key_store(combined_store_yaml)

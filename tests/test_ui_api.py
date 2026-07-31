@@ -31,10 +31,8 @@ class TestUIModelsEndpoint:
 
         by_id = {item["id"]: item["capabilities"] for item in body["data"]}
         assert by_id == {
-            "nvidia/qwen3.6-nvfp4": ["chat"],
-            "nvidia/gemme4-nvfp4": ["chat"],
-            "nvidia/nemotron-vision": ["chat", "vision"],
-            "ollama/nomic-embed-text": ["embeddings"],
+            "local/gemma4-nvfp4": ["chat"],
+            "local/bge-m3": ["embeddings"],
         }
 
     @pytest.mark.asyncio
@@ -42,7 +40,7 @@ class TestUIModelsEndpoint:
         response = await restricted_client.get("/api/ui/models")
         assert response.status_code == 200
         ids = {item["id"] for item in response.json()["data"]}
-        assert ids == {"nvidia/qwen3.6-nvfp4"}
+        assert ids == {"local/gemma4-nvfp4"}
 
 
 class TestGuardrailsConfigsEndpoint:

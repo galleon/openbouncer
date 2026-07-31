@@ -38,7 +38,7 @@ async def test_non_streaming_chat_goes_through_guardrails(client, guardrails_ove
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "guardrails": {"config_id": "no_rails"},
         },
@@ -56,7 +56,7 @@ async def test_non_streaming_chat_blocked_by_output_rail(client, guardrails_over
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "guardrails": {"config_id": "self_check_output"},
         },
@@ -73,7 +73,7 @@ async def test_streaming_chat_goes_through_guardrails(client, guardrails_overrid
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
             "guardrails": {"config_id": "no_rails"},
@@ -101,7 +101,7 @@ async def test_unknown_guardrails_config_id_returns_clean_error(client, guardrai
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "guardrails": {"config_id": "does_not_exist"},
         },
@@ -120,7 +120,7 @@ async def test_preset_field_accepted_and_ignored_by_guardrails_backend(
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "guardrails": {
                 "enabled": True,
@@ -148,7 +148,7 @@ async def test_enabled_false_skips_guardrails_entirely(client):
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "nvidia/qwen3.6-nvfp4",
+                "model": "local/gemma4-nvfp4",
                 "messages": [{"role": "user", "content": "hi"}],
                 "guardrails": {"enabled": False, "config_id": "no_rails"},
             },

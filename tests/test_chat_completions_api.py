@@ -6,7 +6,7 @@ async def test_chat_completions_text_only(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hello there"}],
         },
     )
@@ -21,7 +21,7 @@ async def test_chat_completions_image_input(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/nemotron-vision",
+            "model": "local/gemma4-nvfp4",
             "messages": [
                 {
                     "role": "user",
@@ -46,7 +46,7 @@ async def test_chat_completions_rejects_unsupported_top_level_field(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/qwen3.6-nvfp4",
+            "model": "local/gemma4-nvfp4",
             "messages": [{"role": "user", "content": "hi"}],
             "n": 5,
         },
@@ -63,7 +63,7 @@ async def test_chat_completions_rejects_image_input_missing_url(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/nemotron-vision",
+            "model": "local/gemma4-nvfp4",
             "messages": [
                 {"role": "user", "content": [{"type": "image_url", "image_url": {}}]}
             ],
@@ -80,7 +80,7 @@ async def test_chat_completions_rejects_unsupported_content_part_type(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/nemotron-vision",
+            "model": "local/gemma4-nvfp4",
             "messages": [
                 {
                     "role": "user",
@@ -98,11 +98,7 @@ async def test_chat_completions_rejects_unsupported_content_part_type(client):
 
 @pytest.mark.asyncio
 async def test_chat_completions_accepts_all_allowed_models(client):
-    for model_id in (
-        "nvidia/qwen3.6-nvfp4",
-        "nvidia/gemme4-nvfp4",
-        "nvidia/nemotron-vision",
-    ):
+    for model_id in ("local/gemma4-nvfp4",):
         response = await client.post(
             "/v1/chat/completions",
             json={
@@ -135,7 +131,9 @@ async def test_chat_completions_rejects_upstream_model_name(client):
     response = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "nvidia/Qwen3.6-27B-NVFP4",
+            # The upstream_model string for local/gemma4-nvfp4 (see
+            # config/models.yaml) -- must not resolve as a registry id.
+            "model": "nvidia/Gemma-4-26B-A4B-NVFP4",
             "messages": [{"role": "user", "content": "hi"}],
         },
     )

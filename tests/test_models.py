@@ -13,10 +13,8 @@ async def test_list_models(client):
     # response is filtered down to them even though the full registry (see
     # config/models.yaml) has more.
     expected = {
-        "nvidia/qwen3.6-nvfp4": "nvidia",
-        "nvidia/gemme4-nvfp4": "nvidia",
-        "nvidia/nemotron-vision": "nvidia",
-        "ollama/nomic-embed-text": "ollama",
+        "local/gemma4-nvfp4": "local",
+        "local/bge-m3": "local",
     }
     returned = {item["id"]: item["owned_by"] for item in body["data"]}
     assert returned == expected
