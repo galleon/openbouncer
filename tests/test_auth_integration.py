@@ -1,4 +1,6 @@
+import httpx
 import pytest
+import respx
 from httpx import ASGITransport, AsyncClient
 
 from app.auth.keys import get_key_store, parse_key_store
@@ -11,6 +13,37 @@ CHAT_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 EMBEDDINGS_BODY = {"model": "local/gemma4-nvfp4", "input": "hi"}
+
+CHAT_URL = "http://vllm-gemma4:8000/v1/chat/completions"
+
+
+def _upstream_chat_response():
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "nvidia/Gemma-4-26B-A4B-NVFP4",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+# This file is about auth/rate-limiting/authz behavior, not chat-completion
+# content -- every test that expects 200 needs the real upstream call
+# /v1/chat/completions now makes to succeed, so the upstream is mocked
+# globally here rather than per-test.
+@pytest.fixture(autouse=True)
+def _mock_upstream(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_VLLM_API_KEY", "test-key")
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(CHAT_URL).mock(return_value=httpx.Response(200, json=_upstream_chat_response()))
+        yield mock
 
 
 @pytest.mark.asyncio

@@ -1,13 +1,16 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from nemoguardrails.testing import FakeLLMModel
 
 from app.guardrails.service import GuardrailsService, NemoLibraryGuardrailsService, get_guardrails_service
 from app.main import app
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "guardrails_configs"
+CHAT_URL = "http://vllm-gemma4:8000/v1/chat/completions"
 
 
 @pytest.fixture
@@ -135,7 +138,29 @@ async def test_preset_field_accepted_and_ignored_by_guardrails_backend(
 
 
 @pytest.mark.asyncio
-async def test_enabled_false_skips_guardrails_entirely(client):
+@respx.mock
+async def test_enabled_false_skips_guardrails_entirely(client, monkeypatch):
+    monkeypatch.setenv("UPSTREAM_VLLM_API_KEY", "test-key")
+    route = respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "nvidia/Gemma-4-26B-A4B-NVFP4",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "real upstream reply"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+    )
+
     class ExplodingGuardrailsService(GuardrailsService):
         async def process_chat_completion(self, request):
             raise AssertionError("guardrails.enabled=false must not call GuardrailsService")
@@ -156,6 +181,8 @@ async def test_enabled_false_skips_guardrails_entirely(client):
     finally:
         app.dependency_overrides.pop(get_guardrails_service, None)
 
-    # Falls through to the ordinary (non-guardrails) stub echo path.
+    # Falls through to the ordinary (non-guardrails) path, which calls the
+    # real upstream (mocked here).
     assert response.status_code == 200
-    assert response.json()["choices"][0]["message"]["content"] == "You said: hi"
+    assert response.json()["choices"][0]["message"]["content"] == "real upstream reply"
+    assert route.called

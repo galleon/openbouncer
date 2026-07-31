@@ -1,6 +1,10 @@
 import re
 
+import httpx
 import pytest
+import respx
+
+CHAT_URL = "http://vllm-gemma4:8000/v1/chat/completions"
 
 
 def _metric_value(body: str, name: str, labels: str) -> float:
@@ -61,7 +65,29 @@ async def test_http_requests_total_increments_after_traffic(admin_client):
 
 
 @pytest.mark.asyncio
-async def test_usage_and_chat_completions_reflect_a_real_request(admin_client):
+@respx.mock
+async def test_usage_and_chat_completions_reflect_a_real_request(admin_client, monkeypatch):
+    monkeypatch.setenv("UPSTREAM_VLLM_API_KEY", "test-key")
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "nvidia/Gemma-4-26B-A4B-NVFP4",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+    )
+
     labels_usage = 'key_id="admin-key"'
     labels_chat = 'model="local/gemma4-nvfp4",status="200"'
     before_body = (await admin_client.get("/metrics")).text

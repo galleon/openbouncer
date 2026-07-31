@@ -1,6 +1,5 @@
 import logging
 import time
-import uuid
 from typing import AsyncIterator, Callable
 
 from fastapi import APIRouter, Depends
@@ -18,28 +17,12 @@ from app.core.metrics import CHAT_COMPLETION_DURATION_SECONDS, CHAT_COMPLETIONS_
 from app.core.registry import ModelConcurrencyLimiter, ModelRegistry, get_model_registry, resolve_api_key
 from app.core.request_context import get_request_id
 from app.guardrails.service import GuardrailsService, get_guardrails_service
-from app.schemas.chat import (
-    ChatCompletionChoice,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionUsage,
-    ChatMessage,
-)
+from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from app.upstream.client import UpstreamClient, get_upstream_client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _extract_text(content: str | list) -> str:
-    if isinstance(content, str):
-        return content
-    return " ".join(part.text for part in content if part.type == "text")
-
-
-def _count_tokens(text: str) -> int:
-    return len(text.split())
 
 
 def _guardrails_requested(request: ChatCompletionRequest) -> bool:
@@ -216,32 +199,19 @@ async def create_chat_completion(
             _record_completion("200")
             return guardrails_response
 
-        last_user_message = next(
-            (_extract_text(m.content) for m in reversed(request.messages) if m.role == "user"),
-            "",
-        )
-        reply_content = f"You said: {last_user_message}" if last_user_message else "Hello!"
-
-        prompt_tokens = sum(_count_tokens(_extract_text(m.content)) for m in request.messages)
-        completion_tokens = _count_tokens(reply_content)
-
-        response = ChatCompletionResponse(
-            id=f"chatcmpl-{uuid.uuid4().hex}",
-            created=int(time.time()),
-            model=request.model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=reply_content),
-                    finish_reason="stop",
-                )
-            ],
-            usage=ChatCompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
-        )
+        entry = registry.get(request.model)
+        api_key = resolve_api_key(entry)
+        limiter = registry.get_concurrency_limiter(request.model)
+        async with limiter.acquire():
+            response = await upstream_client.create_chat_completion(
+                base_url=entry.base_url,
+                api_key=api_key,
+                upstream_model=entry.upstream_model,
+                request=request,
+            )
+        # Report our own public model id back to the caller, not whatever the
+        # upstream happened to echo (its upstream_model name may differ).
+        response = response.model_copy(update={"model": request.model})
 
         await usage_tracker.record(
             auth.key_id,

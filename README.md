@@ -361,12 +361,6 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-> With `GUARDRAILS_MODE=disabled` (the default), non-streaming responses are
-> currently a stub echo (`"You said: ..."`) rather than a real upstream call
-> -- useful for exercising auth/rate-limiting/schema validation without an
-> upstream API key, but not a real answer. Streaming (below) and guardrails
-> mode (further below) do call a real backend.
-
 `request.model` must have `chat` in its `capabilities` (see [Model
 registry](#model-registry)) -- an embeddings-only model (e.g.
 `local/bge-m3`) returns a 400 (`error.code: model_does_not_support_chat`)
