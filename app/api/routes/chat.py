@@ -118,7 +118,6 @@ async def create_chat_completion(
             param="model",
             code="model_not_found",
         )
-
     start = time.monotonic()
     guardrails_label = str(_guardrails_requested(request))
 
@@ -130,6 +129,13 @@ async def create_chat_completion(
 
     try:
         ensure_model_allowed(auth, request.model)
+        if "chat" not in registry.get(request.model).capabilities:
+            raise OpenAIError(
+                f"Model `{request.model}` does not support chat completions.",
+                status_code=400,
+                param="model",
+                code="model_does_not_support_chat",
+            )
         requested_config_id = _requested_config_id(request)
         if requested_config_id is not None:
             ensure_guardrails_config_allowed(auth, requested_config_id)

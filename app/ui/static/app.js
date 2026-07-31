@@ -188,13 +188,18 @@ async function loadModels() {
       return;
     }
     const body = await response.json();
+    // This tester only sends /v1/chat/completions requests -- embeddings-
+    // only models (e.g. local/bge-m3) would just fail against that
+    // endpoint, so they're left out of the picker entirely rather than
+    // offered and erroring.
+    const chatModels = body.data.filter((model) => model.capabilities.includes("chat"));
     setSelectOptions(
       modelSelect,
-      body.data.map((model) => [
+      chatModels.map((model) => [
         model.id,
         model.capabilities.length ? `${model.id} (${model.capabilities.join(", ")})` : model.id,
       ]),
-      "-- no models available --",
+      "-- no chat models available --",
     );
   } catch (err) {
     setSelectOptions(modelSelect, [], "-- failed to load models --");

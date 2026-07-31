@@ -127,6 +127,23 @@ async def test_chat_completions_rejects_unregistered_model(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_rejects_embeddings_only_model(client):
+    # local/bge-m3 exists and is allowed for the test key, but its
+    # capabilities are embeddings-only -- no "chat".
+    response = await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/bge-m3",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "model_does_not_support_chat"
+    assert body["error"]["param"] == "model"
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_rejects_upstream_model_name(client):
     response = await client.post(
         "/v1/chat/completions",

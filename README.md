@@ -367,6 +367,12 @@ curl http://localhost:8000/v1/chat/completions \
 > upstream API key, but not a real answer. Streaming (below) and guardrails
 > mode (further below) do call a real backend.
 
+`request.model` must have `chat` in its `capabilities` (see [Model
+registry](#model-registry)) -- an embeddings-only model (e.g.
+`local/bge-m3`) returns a 400 (`error.code: model_does_not_support_chat`)
+rather than being forwarded upstream. The web UI's model picker (see [Web
+UI](#web-ui)) already filters to chat-capable models for this reason.
+
 ### Streaming chat completion
 
 `stream: true` returns Server-Sent Events; `-N`/`--no-buffer` makes curl
