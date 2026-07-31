@@ -13,6 +13,7 @@ from functools import lru_cache
 import httpx
 
 from app.core.errors import OpenAIError, format_sse_error, normalize_upstream_error
+from app.core.metrics import GUARDRAILS_REQUESTS_TOTAL
 
 # Optional dependency (see pyproject.toml's "nemo" extra) -- only needed for
 # GUARDRAILS_MODE=nemo_library (NemoLibraryGuardrailsService below).
@@ -497,6 +498,10 @@ class NemoLibraryGuardrailsService(GuardrailsService):
 
         config_id = self._resolve_config_id(request)
         rails = await self._get_rails(config_id)
+        # Only recorded once config_id is confirmed to be a real, loaded
+        # config (not just well-formed) -- bounded by the actual set of
+        # config_ids on disk, safe to use as a Prometheus label.
+        GUARDRAILS_REQUESTS_TOTAL.labels(config_id=config_id).inc()
         nemo_messages = _to_nemo_messages(request.messages)
 
         try:
@@ -526,6 +531,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
         # coroutine) or this one.
         config_id = self._resolve_config_id(request)
         rails = await self._get_rails(config_id)
+        GUARDRAILS_REQUESTS_TOTAL.labels(config_id=config_id).inc()
         nemo_messages = _to_nemo_messages(request.messages)
         return self._stream_response(rails, nemo_messages, request.model, usage_holder)
 

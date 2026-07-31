@@ -1,0 +1,112 @@
+{
+  "title": "OpenBouncer",
+  "uid": "openbouncer-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP request rate by route",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(openbouncer_http_requests_total[5m])) by (path, method)",
+          "legendFormat": "{{method}} {{path}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP error rate by route (non-2xx)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(openbouncer_http_requests_total{status!~\"2..\"}[5m])) by (path, status)",
+          "legendFormat": "{{path}} ({{status}})"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Chat completion latency (p50/p95) by model",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum(rate(openbouncer_chat_completion_duration_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "p50 {{model}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(openbouncer_chat_completion_duration_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "p95 {{model}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Model concurrency: in-flight / queued",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "openbouncer_model_inflight_requests",
+          "legendFormat": "in-flight {{model}}"
+        },
+        {
+          "refId": "B",
+          "expr": "openbouncer_model_queued_requests",
+          "legendFormat": "queued {{model}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Per-key usage (requests total)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "openbouncer_usage_requests_total",
+          "legendFormat": "{{key_id}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Guardrails requests by config_id",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(openbouncer_guardrails_requests_total[5m])) by (config_id)",
+          "legendFormat": "{{config_id}}"
+        }
+      ]
+    }
+  ]
+}

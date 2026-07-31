@@ -20,6 +20,9 @@ __pycache__/
 # docker-compose env overrides (REDIS_URL, HF_TOKEN, VLLM_IMAGE, etc.) -- local machine config, may hold secrets.
 /.env
 
+# Raw admin API key Prometheus authenticates to the gateway's /metrics with (see observability/prometheus.yml).
+/observability/gateway_admin_key
+
 # Local Claude Code session/tool settings, not project source.
 /.claude/
 

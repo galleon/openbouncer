@@ -197,8 +197,48 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  # Optional: platform-wide metrics -- Prometheus scrapes the gateway
+  # (see app/api/routes/metrics.py) plus vLLM's and Caddy's own
+  # already-built-in Prometheus endpoints, Grafana visualizes them.
+  # Disabled by default -- start explicitly with:
+  #   docker compose --profile observability up
+  #
+  # Requires a file at observability/gateway_admin_key containing a raw
+  # is_admin: true API key (see config/api_keys.yaml) -- gitignored, not
+  # committed. Prometheus's own config format doesn't support ${VAR}
+  # substitution the way this compose file does, so the admin key has to
+  # be a file, not an env var (see observability/prometheus.yml).
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/gateway_admin_key:/etc/prometheus/gateway_admin_key:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  # Bound to loopback like the gateway's own :8000 -- consistent with this
+  # deployment's "only Caddy is externally reachable" posture. Use an SSH
+  # tunnel, or add your own Caddy route later if you want it reachable
+  # through the public domain.
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   redis-data:
   huggingface-cache:
   caddy-data:
   caddy-config:
+  prometheus-data:
+  grafana-data:

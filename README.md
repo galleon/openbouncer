@@ -217,7 +217,7 @@ keys:
     required_sovereignty: {data_residency: EU}  # optional, defaults to unrestricted -- see Sovereignty routing below
     is_admin: false                      # optional, defaults to false -- see Admin API below
     admin_scopes: [metrics:read]         # optional, defaults to [] -- see Scoped admin access below
-    allowed_guardrails_configs: [content_safety]  # optional, defaults to unrestricted -- see Admin API below
+    allowed_guardrails_configs: [self_check_input]  # optional, defaults to unrestricted -- see Admin API below
 ```
 
 ### Sovereignty routing
@@ -423,28 +423,16 @@ actually use.
 
 ### Enabling admin access
 
-1. Add a key with `is_admin: true` to `config/api_keys.yaml` (see
-   [Authentication](#authentication) for the key-generation command) and
-   restart the gateway. That restart is only needed for this first,
-   hand-edited admin key -- every write made *through* the admin API
-   below (creating, editing, rotating, or deleting a key; editing a
-   guardrails config) clears the in-process key-store cache as part of
-   the write, so it's live on the very next request, no restart.
-2. The admin endpoints work read-only without any other setup (listing
-   keys/configs). To actually **save** changes, the gateway needs write
-   access to `config/` and `guardrails_configs/` -- both are read-only in
-   the default `docker-compose.yml`. Opt in explicitly:
-
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.admin.yml up --build
-   ```
-
-   Without this, PATCH requests fail with a clear `409
-   key_store_not_file_backed` / `500 guardrails_config_invalid` instead of
-   silently doing nothing. This is a deliberate, non-default opt-in --
-   see the comment in `docker-compose.admin.yml` for why (the container
-   runs as root with no `USER` directive, so writes make the touched
-   files root-owned on the host).
+Add a key with `is_admin: true` to `config/api_keys.yaml` (see
+[Authentication](#authentication) for the key-generation command) and
+restart the gateway. That restart is only needed for this first,
+hand-edited admin key -- every write made *through* the admin API below
+(creating, editing, rotating, or deleting a key; editing a guardrails
+config) clears the in-process key-store cache as part of the write, so
+it's live on the very next request, no restart. `config/` and
+`guardrails_configs/` are already read-write in this deployment's
+`docker-compose.yml` (see [Running with Docker](#running-with-docker)),
+so admin writes just work, no extra opt-in needed here.
 
 ### Endpoints
 
@@ -810,6 +798,31 @@ payload to the configured webhook and reports the outcome
 (`configured`/`delivered`/`status_code`/`error`) in the response, so an
 operator can verify their webhook URL actually works instead of finding
 out it was typo'd only when a real burst happens.
+
+### Whole-stack metrics (Prometheus + Grafana)
+
+Beyond the gateway's own `/metrics`, this deployment can scrape the whole
+DGX Spark stack at once -- vLLM already exposes Prometheus metrics
+out of the box, and Caddy gets a dedicated metrics listener (see
+`Caddyfile`, `:9090`, deliberately *not* the admin API, which allows live
+reconfiguration and stays bound to `127.0.0.1` inside its container).
+Disabled by default:
+
+```bash
+docker compose --profile observability up -d
+```
+
+Requires, both gitignored/not committed:
+- `observability/gateway_admin_key` -- a file containing a raw `is_admin: true`
+  API key (Prometheus's own config format doesn't support `${VAR}`
+  substitution the way `docker-compose.yml` does, so this has to be a
+  file, not an env var -- see `observability/prometheus.yml`).
+- `GRAFANA_ADMIN_PASSWORD` in `.env`.
+
+Grafana is at `http://localhost:3000` (loopback-only, same posture as the
+gateway's own `:8000` -- not exposed through Caddy by default) with a
+provisioned "OpenBouncer" dashboard covering request rate/latency/errors,
+per-model concurrency, per-key usage, and guardrails request rate.
 
 ### Structured logs
 
