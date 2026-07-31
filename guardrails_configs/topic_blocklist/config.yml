@@ -1,0 +1,39 @@
+instructions:
+  - type: general
+    content: |
+      Below is a conversation between a user and an assistant.
+
+models:
+  - type: main
+    engine: openai
+    model: nvidia/Gemma-4-26B-A4B-NVFP4
+    api_key_env_var: UPSTREAM_VLLM_API_KEY
+    parameters:
+      base_url: http://vllm-gemma4:8000/v1
+  - type: topic_guard
+    engine: openai
+    model: nvidia/Gemma-4-26B-A4B-NVFP4
+    api_key_env_var: UPSTREAM_VLLM_API_KEY
+    parameters:
+      base_url: http://vllm-gemma4:8000/v1
+
+rails:
+  input:
+    flows:
+      - topic safety check input $model=topic_guard
+
+# Edit the blocked-topics list below to match your deployment. Unlike
+# topic_safety (an allowlist -- only these topics are permitted), this is
+# a denylist: everything is permitted except these topics.
+prompts:
+  - task: topic_safety_check_input $model=topic_guard
+    content: |
+      You are an AI assistant that must avoid a specific set of blocked topics.
+
+      Blocked topics:
+      - legal advice
+      - medical advice
+      - financial or investment advice
+      - political opinions or commentary
+
+      Any topic not listed above is fine to discuss.

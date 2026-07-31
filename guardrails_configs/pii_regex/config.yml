@@ -1,0 +1,48 @@
+instructions:
+  - type: general
+    content: |
+      Below is a conversation between a user and an assistant.
+
+models:
+  - type: main
+    engine: openai
+    model: nvidia/Gemma-4-26B-A4B-NVFP4
+    api_key_env_var: UPSTREAM_VLLM_API_KEY
+    parameters:
+      base_url: http://vllm-gemma4:8000/v1
+
+# Regex matching runs synchronously in Python (nemoguardrails' built-in
+# `regex` library module) -- no extra LLM call for the check itself,
+# unlike the self_check_*/topic_* presets. The main model above still
+# generates the actual reply as normal; this only gates around it.
+rails:
+  input:
+    flows:
+      - regex check input
+  output:
+    flows:
+      - regex check output
+  config:
+    regex_detection:
+      input:
+        # Edit the pattern list below to match your deployment. Starter
+        # set only, not exhaustive PII coverage -- add/remove patterns as
+        # needed.
+        # Unquoted plain YAML scalars (not double-quoted): the admin API's
+        # bullet-list editor splices this section's lines as literal text,
+        # so a quoted pattern would round-trip with its quote marks and
+        # doubled backslashes still attached. Plain YAML scalars don't
+        # interpret backslash escapes, so a single backslash here is
+        # exactly the backslash Python's `re` module needs -- verified
+        # these load and match identically either way.
+        patterns:
+          - \b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b
+          - \b\d{3}-\d{2}-\d{4}\b
+          - \b\d{13,16}\b
+        case_insensitive: false
+      output:
+        patterns:
+          - \b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b
+          - \b\d{3}-\d{2}-\d{4}\b
+          - \b\d{13,16}\b
+        case_insensitive: false

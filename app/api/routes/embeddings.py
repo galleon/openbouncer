@@ -47,12 +47,14 @@ async def create_embeddings(
         )
 
     api_key = resolve_api_key(entry)
-    response = await upstream_client.create_embeddings(
-        base_url=entry.base_url,
-        api_key=api_key,
-        upstream_model=entry.upstream_model,
-        request=request,
-    )
+    limiter = registry.get_concurrency_limiter(request.model)
+    async with limiter.acquire():
+        response = await upstream_client.create_embeddings(
+            base_url=entry.base_url,
+            api_key=api_key,
+            upstream_model=entry.upstream_model,
+            request=request,
+        )
     # Report our own public model id back to the caller, not whatever the
     # upstream happened to echo (its upstream_model name may differ).
     response = response.model_copy(update={"model": request.model})

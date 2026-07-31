@@ -88,6 +88,48 @@ EDITABLE_CONFIG_MANIFEST: dict[str, list[EditableSection]] = {
             "Allowed topics:",
         ),
     ],
+    "jailbreak_input": [
+        EditableSection(
+            "policy",
+            "Policy rules",
+            "task: self_check_input",
+            "A message should be blocked if it does any of the following:",
+        ),
+    ],
+    "topic_blocklist": [
+        EditableSection(
+            "blocked_topics",
+            "Blocked topics",
+            "task: topic_safety_check_input $model=topic_guard",
+            "Blocked topics:",
+        ),
+    ],
+    # pii_regex's two `patterns:` lists are plain YAML block-list syntax
+    # (not inside a `content: |` prompt), but the same bullet-splicing
+    # machinery works on them unchanged -- `- item` lines are `- item`
+    # lines either way. task_anchor for each section only needs to land
+    # *before* the right `patterns:` occurrence, not exactly on it: since
+    # cursor always advances past the previously-found section, "input:"
+    # resolves to rails.input (the first "input:" in the file) and then
+    # the first "patterns:" after it is unambiguously
+    # regex_detection.input.patterns; "output:" (searched from where the
+    # input section's bullets ended) then resolves to
+    # regex_detection.output, whose "patterns:" is next. Verified against
+    # the real file in guardrails_configs/pii_regex/config.yml.
+    "pii_regex": [
+        EditableSection(
+            "input_patterns",
+            "Blocked patterns -- input (regex)",
+            "input:",
+            "patterns:",
+        ),
+        EditableSection(
+            "output_patterns",
+            "Blocked patterns -- output (regex)",
+            "output:",
+            "patterns:",
+        ),
+    ],
 }
 
 

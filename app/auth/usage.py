@@ -44,6 +44,13 @@ class UsageTracker:
     def get(self, key_id: str) -> UsageStats:
         return self._stats.get(key_id, UsageStats())
 
+    def all(self) -> dict[str, UsageStats]:
+        """Every key with at least one recorded request -- used by
+        /metrics to export per-key usage as Prometheus gauges (see
+        app/api/routes/metrics.py). A plain dict copy, not a live view, so
+        callers can't accidentally mutate internal state."""
+        return dict(self._stats)
+
 
 @lru_cache
 def get_usage_tracker() -> UsageTracker:

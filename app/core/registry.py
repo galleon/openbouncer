@@ -1,7 +1,9 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import AsyncIterator, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -73,9 +75,51 @@ def resolve_api_key(entry: ModelEntry) -> str:
     return api_key
 
 
+class ModelConcurrencyLimiter:
+    """Bounds concurrent upstream calls for one model to its configured
+    concurrency_limit. A request beyond the limit blocks (queues) rather
+    than being rejected -- simplest v1 behavior; wait time shows up in
+    request latency metrics, so it's visible without needing a separate
+    reject/timeout policy. in_flight/queued are tracked explicitly (rather
+    than reaching into asyncio.Semaphore's private _waiters) so they can be
+    exposed as Prometheus gauges.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.in_flight = 0
+        self.queued = 0
+        self._semaphore = asyncio.Semaphore(limit)
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[None]:
+        self.queued += 1
+        acquired = False
+        try:
+            await self._semaphore.acquire()
+            acquired = True
+            self.queued -= 1
+            self.in_flight += 1
+            yield
+        finally:
+            if acquired:
+                self.in_flight -= 1
+                self._semaphore.release()
+            else:
+                # Never actually acquired (e.g. cancelled while queued) --
+                # nothing to release, just stop counting it as queued.
+                self.queued -= 1
+
+
 class ModelRegistry:
     def __init__(self, entries: list[ModelEntry]):
         self._by_id = {entry.id: entry for entry in entries}
+        # Lazily constructed per model id, kept for the registry's lifetime
+        # (matches get_model_registry() being an effectively-permanent
+        # process-lifetime singleton) -- constructing ModelConcurrencyLimiter
+        # has no `await` in it, so this dict is safe without extra locking
+        # even under concurrent first-use.
+        self._limiters: dict[str, ModelConcurrencyLimiter] = {}
 
     def all(self) -> list[ModelEntry]:
         return list(self._by_id.values())
@@ -85,6 +129,13 @@ class ModelRegistry:
 
     def __contains__(self, model_id: str) -> bool:
         return model_id in self._by_id
+
+    def get_concurrency_limiter(self, model_id: str) -> ModelConcurrencyLimiter:
+        limiter = self._limiters.get(model_id)
+        if limiter is None:
+            limiter = ModelConcurrencyLimiter(self._by_id[model_id].concurrency_limit)
+            self._limiters[model_id] = limiter
+        return limiter
 
 
 def parse_model_registry(raw_yaml: str) -> ModelRegistry:

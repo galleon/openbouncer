@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AdminKeyItem(BaseModel):
@@ -21,6 +21,41 @@ class UpdateKeyGuardrailsConfigsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowed_guardrails_configs: list[str]
+
+
+class CreateKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    allowed_models: list[str] = Field(min_length=1)
+    # None -> falls back to keys.DEFAULT_REQUESTS_PER_MINUTE, same as
+    # hand-editing config/api_keys.yaml without the field.
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    is_admin: bool = False
+    allowed_guardrails_configs: list[str] | None = None
+
+
+class CreateKeyResponse(BaseModel):
+    key: AdminKeyItem
+    # The raw key, returned exactly once -- only a hash is ever persisted,
+    # so this is the only chance the caller has to see it.
+    api_key: str
+
+
+class UpdateKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # All fields default to "unset" (None) so the route can build a
+    # partial-update dict via model_dump(exclude_unset=True) -- an omitted
+    # field is left alone, not nulled out.
+    allowed_models: list[str] | None = Field(default=None, min_length=1)
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    is_admin: bool | None = None
+
+
+class RotateKeyResponse(BaseModel):
+    key: AdminKeyItem
+    api_key: str
 
 
 class AdminEditableSection(BaseModel):

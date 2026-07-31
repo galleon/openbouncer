@@ -173,14 +173,15 @@ limiting, and usage accounting.
 | Over `requests_per_minute` | 429 | `rate_limit_error` | `rate_limit_exceeded` |
 | Model not in the key's `allowed_models` | 403 | `permission_error` | `model_not_allowed` |
 | `guardrails.config_id` not in the key's `allowed_guardrails_configs` | 403 | `permission_error` | `guardrails_config_not_allowed` |
-| `/api/admin/*` called by a non-admin key | 403 | `permission_error` | `admin_required` |
+| `/api/admin/*` (or `/metrics`) called by a non-admin key | 403 | `permission_error` | `admin_required` |
 
 ## Admin API
 
-Lets an `is_admin: true` key manage, over HTTP, two things that otherwise
-require hand-editing config files: which guardrails configs each *other*
-key is allowed to request, and the structured (bullet-list) parts of the
-bundled guardrails presets -- without restarting the gateway.
+Lets an `is_admin: true` key manage, over HTTP, things that otherwise
+require hand-editing config files (and, for new/rotated/deleted keys, a
+restart): the full lifecycle of other keys (create, edit, rotate,
+delete), which guardrails configs each key is allowed to request, and the
+structured (bullet-list) parts of the bundled guardrails presets.
 
 ### Guardrails config access per key
 
@@ -203,9 +204,11 @@ since that default is an operator choice, not something the client picked.
 
 1. Add a key with `is_admin: true` to `config/api_keys.yaml` (see
    [Authentication](#authentication) for the key-generation command) and
-   restart the gateway -- new keys need a restart to be picked up; editing
-   an *existing* key's `allowed_guardrails_configs` through the endpoints
-   below does not.
+   restart the gateway. That restart is only needed for this first,
+   hand-edited admin key -- every write made *through* the admin API
+   below (creating, editing, rotating, or deleting a key; editing a
+   guardrails config) clears the in-process key-store cache as part of
+   the write, so it's live on the very next request, no restart.
 2. The admin endpoints work read-only without any other setup (listing
    keys/configs). To actually **save** changes, the gateway needs write
    access to `config/` and `guardrails_configs/` -- both are read-only in
@@ -229,25 +232,91 @@ All under `/api/admin/*`, all requiring an `is_admin: true` key:
 | Method | Path | Does |
 | --- | --- | --- |
 | GET | `/api/admin/keys` | List all keys (id, `is_admin`, `allowed_models`, `allowed_guardrails_configs`, `requests_per_minute` -- never `key_hash`). |
-| PATCH | `/api/admin/keys/{key_id}/guardrails-configs` | Set a key's `allowed_guardrails_configs` to an explicit list. Persists to `config/api_keys.yaml` and is live on the very next request, no restart. |
-| GET | `/api/admin/guardrails/configs` | List every discovered `config_id`, plus (for the 4 bundled presets) its current structured, editable fields. |
+| POST | `/api/admin/keys` | Create a new key: `id`, `allowed_models`, and optionally `requests_per_minute`, `is_admin`, `allowed_guardrails_configs`. The raw key is generated server-side and returned exactly once in the response (`api_key`) -- only its hash is ever persisted, so this is the only chance to see it. |
+| PATCH | `/api/admin/keys/{key_id}` | Partially update `allowed_models`, `requests_per_minute`, and/or `is_admin` -- omitted fields are left alone. (`allowed_guardrails_configs` has its own endpoint, below.) |
+| POST | `/api/admin/keys/{key_id}/rotate` | Issue a new raw key for an existing id, replacing its stored hash. The old raw key stops working immediately; the new one is returned once, same as create. |
+| DELETE | `/api/admin/keys/{key_id}` | Revoke a key permanently. |
+| PATCH | `/api/admin/keys/{key_id}/guardrails-configs` | Set a key's `allowed_guardrails_configs` to an explicit list. |
+| GET | `/api/admin/guardrails/configs` | List every discovered `config_id`, plus (for the bundled presets listed in `EDITABLE_CONFIG_MANIFEST`) its current structured, editable fields. |
 | PATCH | `/api/admin/guardrails/configs/{config_id}` | Update those structured fields (e.g. `topic_safety`'s allowed-topics list). Persists to `guardrails_configs/<id>/config.yml` and invalidates that config's in-process cache, so the new rules apply on the very next request. |
 
-Only the 4 bundled presets (`self_check_input`, `self_check_output`,
-`self_check_input_output`, `topic_safety`) are structurally editable --
-each is edited via a fixed set of named sections (one per policy/topic
-list), not raw YAML, so an admin can't produce an invalid config. Adding a
+None of the key-lifecycle endpoints stop an admin from deleting or
+demoting their own key -- there's no special-casing for "the only admin
+key," so it's possible to lock yourself out of the admin API this way,
+same sharp edge as rotating the key you're currently authenticated with.
+
+Only the bundled presets listed in `EDITABLE_CONFIG_MANIFEST`
+(`app/guardrails/editable_config.py` -- see `guardrails_configs/README.md`
+for the current list and what each one does) are structurally editable --
+each is edited via a fixed set of named sections (one per policy/topic/
+pattern list), not raw YAML, so an admin can't produce an invalid config. Adding a
 brand-new `config_id` from scratch isn't supported by this API; add one by
 hand under `guardrails_configs/` the normal way (see [`nemo_library`
 mode](#nemo_library-mode)) -- once discovered, an admin can grant keys
 access to it even though its content stays hand-edit-only.
 
 There's also a small admin panel at `/ui/admin.html` (alongside the
-existing chat-tester `/ui`) covering both of the above: a table of keys
-with checkboxes per guardrails config, and an editor per bundled preset
-with one `<textarea>` per section (one item per line). Paste in an
-`is_admin: true` key; a non-admin key gets a clean "access denied" instead
-of a page full of failed requests.
+existing chat-tester `/ui`) covering all of the above: a create-key form,
+a keys table with editable `allowed_models`/`requests_per_minute`/
+`is_admin` (plus Rotate and Delete) and checkboxes per guardrails config,
+and an editor per bundled preset with one `<textarea>` per section (one
+item per line). A newly created or rotated raw key is shown once in a
+dismissible callout, mirroring the API's own one-time-only behavior.
+Paste in an `is_admin: true` key; a non-admin key gets a clean "access
+denied" instead of a page full of failed requests.
+
+## Observability
+
+### Metrics
+
+`GET /metrics` (Prometheus exposition format, gated by `is_admin: true`
+like the rest of the [Admin API](#admin-api)) covers the gateway itself:
+
+- `openbouncer_http_requests_total` / `openbouncer_http_request_duration_seconds`
+  -- every request, labeled by method/route-template/status. Labeled by
+  the *matched route template* (e.g.
+  `/api/admin/keys/{key_id}/guardrails-configs`), not the raw request
+  path, so path parameters and garbage/scanner paths that never match a
+  route can't create unbounded label cardinality.
+- `openbouncer_chat_completions_total` / `openbouncer_chat_completion_duration_seconds`
+  -- per model. For streaming requests the duration covers the *whole*
+  stream (measured when it actually closes), not just time-to-first-chunk.
+  Only recorded once `request.model` is confirmed to exist in the
+  registry, for the same cardinality reason as above.
+- `openbouncer_guardrails_requests_total{config_id}` -- requests processed
+  by each guardrails config. No `blocked` label: nemoguardrails doesn't
+  expose a reliable, config-agnostic "was this blocked" signal through the
+  plain `generate_async()` call this codebase uses (see the comment in
+  `app/core/metrics.py` for what a real fix would need).
+- `openbouncer_model_inflight_requests` / `openbouncer_model_queued_requests`
+  -- live view of each model's concurrency limiter (see below).
+- `openbouncer_usage_requests_total` / `openbouncer_usage_tokens_total`
+  -- the existing per-key `UsageTracker` (see [Usage
+  accounting](#usage-accounting)), exported as gauges.
+
+### Structured logs
+
+Logs are JSON (one object per line) via a small stdlib-only
+`logging.Formatter` in `app/core/logging_config.py`, not the plain
+`%(asctime)s ...` text format. This isn't cosmetic: the previous format
+string never referenced the `extra={...}` fields
+`RequestLoggingMiddleware` already computed (`request_id`, `method`,
+`path`, `status_code`, `duration_ms`), so they were silently dropped --
+JSON output includes every `extra` field automatically, which is also
+what a real log aggregator (Loki, CloudWatch, ELK, ...) actually wants to
+ingest. `LOG_LEVEL` still controls verbosity the same way.
+
+### Model concurrency
+
+`concurrency_limit` in `config/models.yaml` is enforced (an
+`asyncio.Semaphore` per model, see `app/core/registry.py`), not just
+declared -- requests beyond the limit queue rather than being rejected,
+so raising it is a capacity change, not a correctness one. Only requests
+going through `UpstreamClient` directly are covered (the direct-upstream
+streaming chat path and `/v1/embeddings`); guardrails-routed chat
+requests call the model through `NemoLibraryGuardrailsService`'s own
+connection and aren't covered by this limiter even though they may hit
+the same physical server.
 
 ## Examples
 

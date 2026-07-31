@@ -311,6 +311,14 @@ button:disabled {
 
 /* admin.html */
 
+/* Wider than the shared `main` rule above: the keys table has 8 columns
+   (id, admin, editable models, RPM, save, up to 7 guardrails-config
+   checkboxes, save, rotate/delete) and doesn't fit in a 720px column the
+   way index.html's simple chat-tester form does. */
+.admin-main {
+  max-width: 1200px;
+}
+
 .admin-status {
   color: var(--muted);
   font-size: 0.9rem;
@@ -343,8 +351,15 @@ button:disabled {
   color: var(--error);
 }
 
+/* Wraps the table itself (not just #keys-table) so the horizontal
+   scrollbar, when needed, hugs the table instead of the whole section. */
+.admin-table-scroll {
+  overflow-x: auto;
+}
+
 .admin-table {
   width: 100%;
+  min-width: 900px;
   border-collapse: collapse;
   font-size: 0.85rem;
 }
@@ -416,4 +431,51 @@ button:disabled {
     monospace;
   font-size: 0.85rem;
   resize: vertical;
+}
+
+.admin-create-form {
+  margin-bottom: 1.5rem;
+}
+
+.admin-create-form .row {
+  align-items: flex-end;
+}
+
+.admin-table input[type="text"],
+.admin-table input[type="number"] {
+  width: 100%;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.45rem;
+}
+
+.admin-table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.admin-danger {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.admin-raw-key {
+  background: var(--error-bg);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+  font-size: 0.85rem;
+}
+
+.admin-raw-key code {
+  display: block;
+  margin-top: 0.35rem;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+  font-size: 0.9rem;
+  word-break: break-all;
+  user-select: all;
 }

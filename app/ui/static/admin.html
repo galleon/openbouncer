@@ -24,15 +24,41 @@
       </label>
     </header>
 
-    <main>
+    <main class="admin-main">
       <p id="admin-status" class="admin-status" role="status"></p>
 
       <section id="keys-section" class="admin-section" hidden>
         <h2>API keys</h2>
         <p class="admin-hint">
-          Which guardrails configs each key is allowed to request via
+          Create, edit, rotate, or delete keys, and set which guardrails
+          configs each key is allowed to request via
           <code>guardrails.config_id</code>.
         </p>
+
+        <form id="create-key-form" class="admin-create-form">
+          <div class="row">
+            <label class="field">
+              <span>Id</span>
+              <input type="text" id="create-key-id" required placeholder="my-new-key" />
+            </label>
+            <label class="field">
+              <span>Allowed models (comma-separated)</span>
+              <input type="text" id="create-key-models" required placeholder="local/gemma4-nvfp4" />
+            </label>
+            <label class="field">
+              <span>Requests/min (optional)</span>
+              <input type="number" id="create-key-rpm" min="1" placeholder="60" />
+            </label>
+            <label class="checkbox-field">
+              <input type="checkbox" id="create-key-admin" />
+              <span>Admin</span>
+            </label>
+            <button type="submit">Create key</button>
+          </div>
+          <p id="create-key-status" class="admin-row-status" role="status"></p>
+          <div id="create-key-result"></div>
+        </form>
+
         <div id="keys-table"></div>
       </section>
 

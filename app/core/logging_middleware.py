@@ -5,9 +5,26 @@ import uuid
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.metrics import HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUESTS_TOTAL
 from app.core.request_context import request_id_var
 
 logger = logging.getLogger("openbouncer.access")
+
+
+def _route_template(scope: Scope) -> str:
+    # scope["route"] is set in place by Starlette's router once it matches
+    # a route, so it's only available *after* `await self.app(...)` below
+    # returns -- reading it via the raw request path instead would make
+    # path-parameterized routes (e.g. /api/admin/keys/{key_id}/...) create
+    # one Prometheus time series per distinct key_id/config_id ever
+    # requested (and, worse, one per garbage path a scanner throws at the
+    # server, since those never match a route at all) -- unbounded label
+    # cardinality, a classic way to blow up a Prometheus instance.
+    route = scope.get("route")
+    path_format = getattr(route, "path_format", None)
+    if path_format:
+        return path_format
+    return "unmatched"
 
 
 class RequestLoggingMiddleware:
@@ -53,7 +70,8 @@ class RequestLoggingMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
-            duration_ms = round((time.monotonic() - start) * 1000, 2)
+            duration_seconds = time.monotonic() - start
+            duration_ms = round(duration_seconds * 1000, 2)
             logger.info(
                 "request end",
                 extra={
@@ -63,5 +81,12 @@ class RequestLoggingMiddleware:
                     "status_code": status_code,
                     "duration_ms": duration_ms,
                 },
+            )
+            route_template = _route_template(scope)
+            HTTP_REQUESTS_TOTAL.labels(
+                method=method, path=route_template, status=str(status_code)
+            ).inc()
+            HTTP_REQUEST_DURATION_SECONDS.labels(method=method, path=route_template).observe(
+                duration_seconds
             )
             request_id_var.reset(token)

@@ -2,13 +2,24 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
+from fastapi import status as http_status
 
 from app.auth.dependency import AuthContext, require_admin
 from app.auth.keys import (
+    DEFAULT_REQUESTS_PER_MINUTE,
+    KEY_ID_PATTERN,
     AdminPersistenceError,
+    APIKeyRecord,
+    KeyAlreadyExistsError,
     KeyStore,
+    create_key,
+    delete_key,
+    generate_api_key,
     get_key_store,
+    hash_api_key,
+    rotate_key,
     update_key_allowed_guardrails_configs,
+    update_key_fields,
 )
 from app.core.errors import OpenAIError
 from app.core.request_context import get_request_id
@@ -26,8 +37,12 @@ from app.schemas.admin import (
     AdminGuardrailsConfigListResponse,
     AdminKeyItem,
     AdminKeyListResponse,
+    CreateKeyRequest,
+    CreateKeyResponse,
+    RotateKeyResponse,
     UpdateGuardrailsConfigRequest,
     UpdateKeyGuardrailsConfigsRequest,
+    UpdateKeyRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +70,156 @@ async def list_keys(
     auth: AuthContext = Depends(require_admin),
 ) -> AdminKeyListResponse:
     return AdminKeyListResponse(keys=[_to_admin_key_item(record) for record in key_store.all()])
+
+
+@router.post(
+    "/api/admin/keys", response_model=CreateKeyResponse, status_code=http_status.HTTP_201_CREATED
+)
+async def create_key_endpoint(
+    body: CreateKeyRequest,
+    catalog: GuardrailsCatalogService = Depends(get_guardrails_catalog_service),
+    auth: AuthContext = Depends(require_admin),
+) -> CreateKeyResponse:
+    if not KEY_ID_PATTERN.match(body.id):
+        raise OpenAIError(
+            f"Invalid key id `{body.id}`.",
+            status_code=422,
+            error_type="invalid_request_error",
+            param="id",
+            code="invalid_key_id",
+        )
+
+    if body.allowed_guardrails_configs is not None:
+        known_config_ids = {summary.config_id for summary in catalog.list_configs()}
+        for config_id in body.allowed_guardrails_configs:
+            if not CONFIG_ID_PATTERN.match(config_id) or config_id not in known_config_ids:
+                raise OpenAIError(
+                    f"Unknown guardrails config_id `{config_id}`.",
+                    status_code=422,
+                    error_type="invalid_request_error",
+                    param="allowed_guardrails_configs",
+                    code="guardrails_config_not_found",
+                )
+
+    raw_key = generate_api_key()
+    record = APIKeyRecord(
+        id=body.id,
+        key_hash=hash_api_key(raw_key),
+        allowed_models=body.allowed_models,
+        requests_per_minute=body.requests_per_minute or DEFAULT_REQUESTS_PER_MINUTE,
+        is_admin=body.is_admin,
+        allowed_guardrails_configs=body.allowed_guardrails_configs,
+    )
+
+    try:
+        record = await create_key(record)
+    except KeyAlreadyExistsError:
+        raise OpenAIError(
+            f"Key id `{body.id}` already exists.",
+            status_code=409,
+            error_type="invalid_request_error",
+            param="id",
+            code="key_already_exists",
+        ) from None
+    except AdminPersistenceError as exc:
+        raise OpenAIError(
+            str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
+        ) from exc
+
+    logger.info(
+        "admin key_id=%s created key_id=%s is_admin=%s [request_id=%s]",
+        auth.key_id,
+        record.id,
+        record.is_admin,
+        get_request_id(),
+    )
+    return CreateKeyResponse(key=_to_admin_key_item(record), api_key=raw_key)
+
+
+@router.patch("/api/admin/keys/{key_id}", response_model=AdminKeyItem)
+async def update_key_endpoint(
+    key_id: str,
+    body: UpdateKeyRequest,
+    auth: AuthContext = Depends(require_admin),
+) -> AdminKeyItem:
+    fields = body.model_dump(exclude_unset=True)
+    try:
+        record = await update_key_fields(key_id, **fields)
+    except KeyError:
+        raise OpenAIError(
+            f"Unknown key id `{key_id}`.",
+            status_code=404,
+            error_type="invalid_request_error",
+            code="key_not_found",
+        ) from None
+    except AdminPersistenceError as exc:
+        raise OpenAIError(
+            str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
+        ) from exc
+
+    logger.info(
+        "admin key_id=%s updated key_id=%s fields=%s [request_id=%s]",
+        auth.key_id,
+        key_id,
+        sorted(fields.keys()),
+        get_request_id(),
+    )
+    return _to_admin_key_item(record)
+
+
+@router.post("/api/admin/keys/{key_id}/rotate", response_model=RotateKeyResponse)
+async def rotate_key_endpoint(
+    key_id: str,
+    auth: AuthContext = Depends(require_admin),
+) -> RotateKeyResponse:
+    try:
+        record, raw_key = await rotate_key(key_id)
+    except KeyError:
+        raise OpenAIError(
+            f"Unknown key id `{key_id}`.",
+            status_code=404,
+            error_type="invalid_request_error",
+            code="key_not_found",
+        ) from None
+    except AdminPersistenceError as exc:
+        raise OpenAIError(
+            str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
+        ) from exc
+
+    logger.info(
+        "admin key_id=%s rotated key_id=%s [request_id=%s]",
+        auth.key_id,
+        key_id,
+        get_request_id(),
+    )
+    return RotateKeyResponse(key=_to_admin_key_item(record), api_key=raw_key)
+
+
+@router.delete("/api/admin/keys/{key_id}", status_code=http_status.HTTP_204_NO_CONTENT)
+async def delete_key_endpoint(
+    key_id: str,
+    auth: AuthContext = Depends(require_admin),
+) -> None:
+    try:
+        await delete_key(key_id)
+    except KeyError:
+        raise OpenAIError(
+            f"Unknown key id `{key_id}`.",
+            status_code=404,
+            error_type="invalid_request_error",
+            code="key_not_found",
+        ) from None
+    except AdminPersistenceError as exc:
+        raise OpenAIError(
+            str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
+        ) from exc
+
+    logger.info(
+        "admin key_id=%s deleted key_id=%s [request_id=%s]",
+        auth.key_id,
+        key_id,
+        get_request_id(),
+    )
 
 
 @router.patch("/api/admin/keys/{key_id}/guardrails-configs", response_model=AdminKeyItem)

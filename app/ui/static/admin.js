@@ -8,6 +8,33 @@ const keysSection = document.getElementById("keys-section");
 const keysTableEl = document.getElementById("keys-table");
 const guardrailsSection = document.getElementById("guardrails-section");
 const guardrailsCardsEl = document.getElementById("guardrails-cards");
+const createKeyForm = document.getElementById("create-key-form");
+const createKeyIdInput = document.getElementById("create-key-id");
+const createKeyModelsInput = document.getElementById("create-key-models");
+const createKeyRpmInput = document.getElementById("create-key-rpm");
+const createKeyAdminInput = document.getElementById("create-key-admin");
+const createKeyStatusEl = document.getElementById("create-key-status");
+const createKeyResultEl = document.getElementById("create-key-result");
+
+function splitCommaList(value) {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function renderRawKeyCallout(container, apiKey) {
+  container.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "admin-raw-key";
+  const label = document.createElement("span");
+  label.textContent = "Raw key (shown once -- copy it now, it can't be retrieved again):";
+  const code = document.createElement("code");
+  code.textContent = apiKey;
+  box.appendChild(label);
+  box.appendChild(code);
+  container.appendChild(box);
+}
 
 let knownConfigIds = [];
 
@@ -39,8 +66,8 @@ function renderKeysTable(keys) {
 
   const thead = document.createElement("thead");
   thead.innerHTML =
-    "<tr><th>Key</th><th>Admin</th><th>Allowed models</th>" +
-    "<th>Allowed guardrails configs</th><th></th></tr>";
+    "<tr><th>Key</th><th>Admin</th><th>Allowed models</th><th>Requests/min</th>" +
+    "<th></th><th>Allowed guardrails configs</th><th></th><th>Actions</th></tr>";
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
@@ -52,17 +79,57 @@ function renderKeysTable(keys) {
     tr.appendChild(idTd);
 
     const adminTd = document.createElement("td");
-    if (key.is_admin) {
-      const badge = document.createElement("span");
-      badge.className = "admin-badge";
-      badge.textContent = "admin";
-      adminTd.appendChild(badge);
-    }
+    const adminCheckbox = document.createElement("input");
+    adminCheckbox.type = "checkbox";
+    adminCheckbox.checked = key.is_admin;
+    adminTd.appendChild(adminCheckbox);
     tr.appendChild(adminTd);
 
     const modelsTd = document.createElement("td");
-    modelsTd.textContent = key.allowed_models.join(", ");
+    const modelsInput = document.createElement("input");
+    modelsInput.type = "text";
+    modelsInput.value = key.allowed_models.join(", ");
+    modelsTd.appendChild(modelsInput);
     tr.appendChild(modelsTd);
+
+    const rpmTd = document.createElement("td");
+    const rpmInput = document.createElement("input");
+    rpmInput.type = "number";
+    rpmInput.min = "1";
+    rpmInput.value = key.requests_per_minute;
+    rpmTd.appendChild(rpmInput);
+    tr.appendChild(rpmTd);
+
+    const keyActionTd = document.createElement("td");
+    const keySaveButton = document.createElement("button");
+    keySaveButton.type = "button";
+    keySaveButton.textContent = "Save";
+    const keyRowStatus = document.createElement("span");
+    keyRowStatus.className = "admin-row-status";
+    keySaveButton.addEventListener("click", async () => {
+      const allowedModels = splitCommaList(modelsInput.value);
+      if (allowedModels.length === 0) {
+        setStatusText(keyRowStatus, "Allowed models can't be empty.", true);
+        return;
+      }
+      const rpm = parseInt(rpmInput.value, 10);
+      keySaveButton.disabled = true;
+      setStatusText(keyRowStatus, "Saving...");
+      const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          allowed_models: allowedModels,
+          requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
+          is_admin: adminCheckbox.checked,
+        }),
+      });
+      keySaveButton.disabled = false;
+      setStatusText(keyRowStatus, response.ok ? "Saved." : formatError(body), !response.ok);
+    });
+    keyActionTd.appendChild(keySaveButton);
+    keyActionTd.appendChild(keyRowStatus);
+    tr.appendChild(keyActionTd);
 
     const configsTd = document.createElement("td");
     configsTd.className = "admin-config-checkboxes";
@@ -116,10 +183,70 @@ function renderKeysTable(keys) {
     actionTd.appendChild(rowStatus);
     tr.appendChild(actionTd);
 
+    const lifecycleTd = document.createElement("td");
+    lifecycleTd.className = "admin-table-actions";
+
+    const rotateButton = document.createElement("button");
+    rotateButton.type = "button";
+    rotateButton.textContent = "Rotate";
+    const lifecycleStatus = document.createElement("span");
+    lifecycleStatus.className = "admin-row-status";
+    rotateButton.addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          `Rotate "${key.id}"? Its current raw key will stop working immediately.`,
+        )
+      ) {
+        return;
+      }
+      rotateButton.disabled = true;
+      setStatusText(lifecycleStatus, "Rotating...");
+      const { response, body } = await apiFetch(
+        `/api/admin/keys/${encodeURIComponent(key.id)}/rotate`,
+        { method: "POST" },
+      );
+      rotateButton.disabled = false;
+      if (response.ok) {
+        setStatusText(lifecycleStatus, "Rotated.");
+        renderRawKeyCallout(createKeyResultEl, body.api_key);
+      } else {
+        setStatusText(lifecycleStatus, formatError(body), true);
+      }
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "admin-danger";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      if (!window.confirm(`Delete key "${key.id}"? This can't be undone.`)) {
+        return;
+      }
+      deleteButton.disabled = true;
+      setStatusText(lifecycleStatus, "Deleting...");
+      const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
+        method: "DELETE",
+      });
+      if (response.ok || response.status === 204) {
+        tr.remove();
+      } else {
+        deleteButton.disabled = false;
+        setStatusText(lifecycleStatus, formatError(body), true);
+      }
+    });
+
+    lifecycleTd.appendChild(rotateButton);
+    lifecycleTd.appendChild(deleteButton);
+    lifecycleTd.appendChild(lifecycleStatus);
+    tr.appendChild(lifecycleTd);
+
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  keysTableEl.appendChild(table);
+  const scrollWrapper = document.createElement("div");
+  scrollWrapper.className = "admin-table-scroll";
+  scrollWrapper.appendChild(table);
+  keysTableEl.appendChild(scrollWrapper);
 }
 
 function renderGuardrailsCards(configs) {
@@ -230,6 +357,8 @@ async function refreshAccess() {
   guardrailsSection.hidden = true;
   keysTableEl.innerHTML = "";
   guardrailsCardsEl.innerHTML = "";
+  createKeyResultEl.innerHTML = "";
+  setStatusText(createKeyStatusEl, "");
 
   const apiKey = currentApiKey();
   if (!apiKey) {
@@ -258,6 +387,42 @@ async function refreshAccess() {
   setStatusText(adminStatusEl, `Signed in as admin key "${body.key_id}".`);
   await loadAdminPanel();
 }
+
+createKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const allowedModels = splitCommaList(createKeyModelsInput.value);
+  if (allowedModels.length === 0) {
+    setStatusText(createKeyStatusEl, "Allowed models can't be empty.", true);
+    return;
+  }
+  const rpm = parseInt(createKeyRpmInput.value, 10);
+
+  const submitButton = createKeyForm.querySelector("button[type=submit]");
+  submitButton.disabled = true;
+  setStatusText(createKeyStatusEl, "Creating...");
+  createKeyResultEl.innerHTML = "";
+
+  const { response, body } = await apiFetch("/api/admin/keys", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: createKeyIdInput.value.trim(),
+      allowed_models: allowedModels,
+      requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
+      is_admin: createKeyAdminInput.checked,
+    }),
+  });
+  submitButton.disabled = false;
+
+  if (response.ok) {
+    setStatusText(createKeyStatusEl, `Created "${body.key.id}".`);
+    renderRawKeyCallout(createKeyResultEl, body.api_key);
+    createKeyForm.reset();
+    await loadAdminPanel();
+  } else {
+    setStatusText(createKeyStatusEl, formatError(body), true);
+  }
+});
 
 apiKeyInput.addEventListener("change", () => {
   localStorage.setItem(API_KEY_STORAGE_KEY, apiKeyInput.value);

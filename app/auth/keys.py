@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import os
 import re
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
@@ -158,6 +159,18 @@ class AdminPersistenceError(RuntimeError):
     ignored on next load)."""
 
 
+class KeyAlreadyExistsError(RuntimeError):
+    """Raised by create_key() when the requested id is already taken."""
+
+
+# Key ids appear in URL paths (/api/admin/keys/{key_id}/...) and log lines
+# -- restricted to a safe charset for new keys, same idea as
+# app.guardrails.service.CONFIG_ID_PATTERN. Checked at the route layer (see
+# app/api/routes/admin.py), not as an APIKeyRecord field validator, so it
+# can't retroactively reject an existing config/api_keys.yaml with a
+# legacy id that predates this pattern.
+KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
 # Serializes read-modify-write across concurrent admin requests -- without
 # this, two overlapping PATCHes could both read the pre-change file and the
 # second write would clobber the first's update.
@@ -177,6 +190,86 @@ def _writable_path() -> Path:
     return Path(explicit_path) if explicit_path else DEFAULT_CONFIG_PATH
 
 
+def _load_writable_config() -> APIKeyStoreConfig:
+    path = _writable_path()
+    raw = path.read_text() if path.exists() else "keys: []\n"
+    return APIKeyStoreConfig(**(yaml.safe_load(raw) or {}))
+
+
+def _persist_config(config: APIKeyStoreConfig) -> None:
+    path = _writable_path()
+    # exclude_none so keys that were never restricted (the common case)
+    # keep round-tripping without gaining an explicit
+    # `allowed_guardrails_configs: null` line just because some *other*
+    # key in the file got edited.
+    new_yaml = yaml.safe_dump(config.model_dump(mode="json", exclude_none=True), sort_keys=False)
+    atomic_write_text(path, new_yaml)
+    get_key_store.cache_clear()
+
+
+def generate_api_key() -> str:
+    """Matches the README's manual key-generation one-liner."""
+    return "sk-" + secrets.token_urlsafe(32)
+
+
+async def create_key(record: APIKeyRecord) -> APIKeyRecord:
+    """Persists a brand-new key and invalidates get_key_store()'s cache so
+    it's live on the very next request -- no restart needed. Raises
+    KeyAlreadyExistsError if record.id is already taken, AdminPersistenceError
+    if the store isn't file-backed.
+    """
+    async with _write_lock:
+        config = _load_writable_config()
+        if any(k.id == record.id for k in config.keys):
+            raise KeyAlreadyExistsError(record.id)
+        new_config = APIKeyStoreConfig(keys=[*config.keys, record])
+        _persist_config(new_config)
+        return record
+
+
+async def update_key_fields(key_id: str, **fields: object) -> APIKeyRecord:
+    """Persists a partial update to an existing key and invalidates
+    get_key_store()'s cache. Raises KeyError if key_id doesn't exist,
+    AdminPersistenceError if the store isn't file-backed.
+    """
+    async with _write_lock:
+        config = _load_writable_config()
+        if not any(k.id == key_id for k in config.keys):
+            raise KeyError(key_id)
+
+        new_keys = [
+            k.model_copy(update=fields) if k.id == key_id else k for k in config.keys
+        ]
+        # Re-validate the whole store (not just the one record) before
+        # writing, so a bug here can't persist an inconsistent file.
+        new_config = APIKeyStoreConfig(keys=new_keys)
+        _persist_config(new_config)
+        return next(k for k in new_keys if k.id == key_id)
+
+
+async def delete_key(key_id: str) -> None:
+    """Removes a key and invalidates get_key_store()'s cache. Raises
+    KeyError if key_id doesn't exist, AdminPersistenceError if the store
+    isn't file-backed.
+    """
+    async with _write_lock:
+        config = _load_writable_config()
+        if not any(k.id == key_id for k in config.keys):
+            raise KeyError(key_id)
+        new_keys = [k for k in config.keys if k.id != key_id]
+        _persist_config(APIKeyStoreConfig(keys=new_keys))
+
+
+async def rotate_key(key_id: str) -> tuple[APIKeyRecord, str]:
+    """Issues a new raw key for an existing key id, replacing its stored
+    hash. Returns (record, raw_key) -- the raw key is never persisted or
+    retrievable again after this. Raises KeyError if key_id doesn't exist.
+    """
+    raw_key = generate_api_key()
+    record = await update_key_fields(key_id, key_hash=hash_api_key(raw_key))
+    return record, raw_key
+
+
 async def update_key_allowed_guardrails_configs(
     key_id: str, allowed_guardrails_configs: list[str]
 ) -> APIKeyRecord:
@@ -185,30 +278,6 @@ async def update_key_allowed_guardrails_configs(
     -- no restart needed. Raises KeyError if key_id doesn't exist,
     AdminPersistenceError if the store isn't file-backed.
     """
-    async with _write_lock:
-        path = _writable_path()
-        raw = path.read_text() if path.exists() else "keys: []\n"
-        config = APIKeyStoreConfig(**(yaml.safe_load(raw) or {}))
-        if not any(k.id == key_id for k in config.keys):
-            raise KeyError(key_id)
-
-        new_keys = [
-            k.model_copy(update={"allowed_guardrails_configs": list(allowed_guardrails_configs)})
-            if k.id == key_id
-            else k
-            for k in config.keys
-        ]
-        # Re-validate the whole store (not just the one record) before
-        # writing, so a bug here can't persist an inconsistent file.
-        new_config = APIKeyStoreConfig(keys=new_keys)
-        # exclude_none so keys that were never restricted (the common case)
-        # keep round-tripping without gaining an explicit
-        # `allowed_guardrails_configs: null` line just because some *other*
-        # key in the file got edited.
-        new_yaml = yaml.safe_dump(
-            new_config.model_dump(mode="json", exclude_none=True), sort_keys=False
-        )
-        atomic_write_text(path, new_yaml)
-
-        get_key_store.cache_clear()
-        return next(k for k in new_keys if k.id == key_id)
+    return await update_key_fields(
+        key_id, allowed_guardrails_configs=list(allowed_guardrails_configs)
+    )
