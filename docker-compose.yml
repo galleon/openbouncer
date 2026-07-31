@@ -45,8 +45,18 @@ services:
       # use OpenBouncer's built-in in-memory rate limiter instead.
       REDIS_URL: ${REDIS_URL:-}
     volumes:
-      - ./config:/app/config:ro
-      - ./guardrails_configs:/app/guardrails_configs:ro
+      # Read-write as of the admin UI (app/api/routes/admin.py): admin
+      # edits (per-key allowed_guardrails_configs, guardrails config bullet
+      # lists) are persisted by rewriting these files in place from inside
+      # the container. Deliberate security-posture change from the
+      # previous read-only mounts -- the container has no USER directive
+      # (runs as root), so after the first admin write the touched file(s)
+      # will be owned by root on the host, possibly needing `sudo` to
+      # hand-edit afterward. Every admin write is also logged
+      # (logger.info in app/api/routes/admin.py) for a trace of what
+      # changed.
+      - ./config:/app/config
+      - ./guardrails_configs:/app/guardrails_configs
     restart: unless-stopped
 
   # TLS-terminating reverse proxy in front of `gateway` -- the only service
