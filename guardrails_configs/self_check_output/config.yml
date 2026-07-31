@@ -1,0 +1,37 @@
+instructions:
+  - type: general
+    content: |
+      Below is a conversation between a user and an assistant.
+
+models:
+  - type: main
+    engine: openai
+    model: nvidia/Gemma-4-26B-A4B-NVFP4
+    api_key_env_var: UPSTREAM_VLLM_API_KEY
+    parameters:
+      base_url: http://vllm-gemma4:8000/v1
+
+rails:
+  output:
+    flows:
+      - self check output
+
+prompts:
+  - task: self_check_output
+    output_parser: is_content_safe
+    content: |
+      Your task is to check if the bot message below complies with the company policy.
+
+      Company policy for the bot:
+      - messages should not contain any explicit content, even if just a few words
+      - messages should not contain abusive language or offensive content, even if just a few words
+      - messages should not contain any harmful content
+      - messages should not contain racially insensitive content
+      - messages should not contain any word that can be considered offensive
+      - if a message is a refusal, should be polite
+      - it's ok to give instructions on how to protect a company's or a person's interests
+
+      Bot message: "{{ bot_response }}"
+
+      Question: Should the message be blocked (Yes or No)?
+      Answer:

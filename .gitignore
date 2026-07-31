@@ -7,5 +7,8 @@ __pycache__/
 # Real API key config (contains key hashes) -- keep only the .example.yaml template tracked.
 /config/api_keys.yaml
 
+# docker-compose env overrides (REDIS_URL, HF_TOKEN, VLLM_IMAGE, etc.) -- local machine config, may hold secrets.
+/.env
+
 # Local Claude Code session/tool settings, not project source.
 /.claude/

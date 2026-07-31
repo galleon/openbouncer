@@ -303,20 +303,27 @@ and pass the request's `guardrails.config_id`:
 ```bash
 export GUARDRAILS_MODE=nemo_library
 export GUARDRAILS_NEMO_LIBRARY_CONFIG_PATH=./guardrails_configs
-# add a config, e.g. ./guardrails_configs/content_safety/config.yml -- see
-# the "nemo_library mode" section below for the directory layout, or copy
-# one of tests/fixtures/guardrails_configs/* to try it without configuring
-# a real upstream LLM engine
 ```
+
+Four working presets already ship in `guardrails_configs/` --
+`self_check_input`, `self_check_output`, `self_check_input_output`, and
+`topic_safety` -- each using one of [NeMo Guardrails' built-in library rail
+types](https://docs.nvidia.com/nemo/guardrails/about-nemo-guardrails-library/rail-types)
+against `local/gemma4-nvfp4` as the guardrails LLM (see
+`guardrails_configs/README.md` for what each one does, and how to point
+them at a different model). Add your own alongside them following the same
+layout (see the "nemo_library mode" section below), or copy one of
+`tests/fixtures/guardrails_configs/*` to try the mechanism without
+configuring a real upstream LLM engine.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer $OPENBOUNCER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/qwen3.6-nvfp4",
+    "model": "local/gemma4-nvfp4",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "guardrails": {"config_id": "content_safety"}
+    "guardrails": {"config_id": "self_check_input_output"}
   }'
 ```
 
