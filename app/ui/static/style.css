@@ -448,6 +448,12 @@ button:disabled {
   padding: 0.3rem 0.45rem;
 }
 
+.admin-table button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
 .admin-table-actions {
   display: flex;
   flex-wrap: wrap;

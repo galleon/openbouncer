@@ -132,7 +132,13 @@ function renderKeysTable(keys) {
     tr.appendChild(keyActionTd);
 
     const configsTd = document.createElement("td");
-    configsTd.className = "admin-config-checkboxes";
+    // The flex layout goes on an inner wrapper, not the <td> itself --
+    // overriding a table cell's own `display` away from `table-cell`
+    // breaks its participation in the table's row-height/border-collapse
+    // layout (visibly misaligned row borders in some browsers).
+    const configsWrapper = document.createElement("div");
+    configsWrapper.className = "admin-config-checkboxes";
+    configsTd.appendChild(configsWrapper);
     // null means unrestricted (this key can set guardrails.config_id to
     // anything, the state every key has until an admin explicitly
     // restricts it) -- distinct from an empty array, which means
@@ -142,7 +148,7 @@ function renderKeysTable(keys) {
       const note = document.createElement("p");
       note.className = "admin-hint";
       note.textContent = "Unrestricted (any config_id allowed). Check any box to restrict.";
-      configsTd.appendChild(note);
+      configsWrapper.appendChild(note);
     }
     const checkboxes = {};
     for (const configId of knownConfigIds) {
@@ -154,7 +160,7 @@ function renderKeysTable(keys) {
       checkboxes[configId] = checkbox;
       label.appendChild(checkbox);
       label.appendChild(document.createTextNode(configId));
-      configsTd.appendChild(label);
+      configsWrapper.appendChild(label);
     }
     tr.appendChild(configsTd);
 
@@ -184,7 +190,11 @@ function renderKeysTable(keys) {
     tr.appendChild(actionTd);
 
     const lifecycleTd = document.createElement("td");
-    lifecycleTd.className = "admin-table-actions";
+    // Same reasoning as configsWrapper above: the flex layout goes on an
+    // inner wrapper, never directly on the <td>.
+    const lifecycleWrapper = document.createElement("div");
+    lifecycleWrapper.className = "admin-table-actions";
+    lifecycleTd.appendChild(lifecycleWrapper);
 
     const rotateButton = document.createElement("button");
     rotateButton.type = "button";
@@ -235,9 +245,9 @@ function renderKeysTable(keys) {
       }
     });
 
-    lifecycleTd.appendChild(rotateButton);
-    lifecycleTd.appendChild(deleteButton);
-    lifecycleTd.appendChild(lifecycleStatus);
+    lifecycleWrapper.appendChild(rotateButton);
+    lifecycleWrapper.appendChild(deleteButton);
+    lifecycleWrapper.appendChild(lifecycleStatus);
     tr.appendChild(lifecycleTd);
 
     tbody.appendChild(tr);
