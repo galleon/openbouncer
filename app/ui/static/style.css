@@ -196,12 +196,9 @@ button:disabled {
 
 #response {
   margin: 0.75rem 0 0;
-  white-space: pre-wrap;
   word-break: break-word;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
-    monospace;
   font-size: 0.9rem;
+  line-height: 1.5;
   min-height: 4rem;
 }
 
@@ -210,4 +207,84 @@ button:disabled {
   background: var(--error-bg);
   padding: 0.75rem;
   border-radius: 8px;
+  white-space: pre-wrap;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+#response p {
+  margin: 0 0 0.75rem;
+}
+
+#response > *:first-child {
+  margin-top: 0;
+}
+
+#response > *:last-child {
+  margin-bottom: 0;
+}
+
+#response h1,
+#response h2,
+#response h3,
+#response h4,
+#response h5,
+#response h6 {
+  margin: 1rem 0 0.5rem;
+  line-height: 1.25;
+}
+
+#response ul,
+#response ol {
+  margin: 0 0 0.75rem;
+  padding-left: 1.5rem;
+}
+
+#response li {
+  margin: 0.15rem 0;
+}
+
+#response blockquote {
+  margin: 0 0 0.75rem;
+  padding: 0.25rem 0.75rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+#response code {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.85em;
+}
+
+#response pre {
+  margin: 0 0 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+
+#response pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+#response hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1rem 0;
+}
+
+#response a {
+  color: var(--accent);
 }

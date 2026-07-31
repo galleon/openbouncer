@@ -22,8 +22,150 @@ function setStatus(message, isError = false) {
   statusEl.classList.toggle("error", isError);
 }
 
+// Minimal, self-contained Markdown -> HTML renderer for the response box.
+// Deliberately not a CDN-loaded library: this page holds a live bearer API
+// key (in the API-key field / localStorage), so pulling in third-party JS
+// here would be a real exfiltration risk if that script were ever
+// compromised or MITM'd. Every line is HTML-escaped before any markdown
+// syntax is turned into tags, and link hrefs are restricted to http(s)/
+// mailto, so model output (which is untrusted -- e.g. a prompt-injected
+// response) can't inject live markup or script.
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderInlineMarkdown(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_, label, url) => {
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+  return out;
+}
+
+function renderMarkdown(source) {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  let html = "";
+  let listType = null;
+  let i = 0;
+
+  function closeList() {
+    if (listType) {
+      html += listType === "ul" ? "</ul>" : "</ol>";
+      listType = null;
+    }
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    const fenceMatch = line.match(/^```(\w*)\s*$/);
+    if (fenceMatch) {
+      closeList();
+      i++;
+      const codeLines = [];
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++;
+      html += `<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
+      continue;
+    }
+
+    if (line.trim() === "") {
+      closeList();
+      i++;
+      continue;
+    }
+
+    const headerMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headerMatch) {
+      closeList();
+      const level = headerMatch[1].length;
+      html += `<h${level}>${renderInlineMarkdown(headerMatch[2])}</h${level}>`;
+      i++;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      closeList();
+      html += "<hr>";
+      i++;
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      closeList();
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      html += `<blockquote>${renderInlineMarkdown(quoteLines.join(" "))}</blockquote>`;
+      continue;
+    }
+
+    const ulMatch = line.match(/^[-*]\s+(.*)$/);
+    if (ulMatch) {
+      if (listType !== "ul") {
+        closeList();
+        html += "<ul>";
+        listType = "ul";
+      }
+      html += `<li>${renderInlineMarkdown(ulMatch[1])}</li>`;
+      i++;
+      continue;
+    }
+
+    const olMatch = line.match(/^\d+\.\s+(.*)$/);
+    if (olMatch) {
+      if (listType !== "ol") {
+        closeList();
+        html += "<ol>";
+        listType = "ol";
+      }
+      html += `<li>${renderInlineMarkdown(olMatch[1])}</li>`;
+      i++;
+      continue;
+    }
+
+    closeList();
+    const paraLines = [line];
+    i++;
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !/^```/.test(lines[i]) &&
+      !/^#{1,6}\s/.test(lines[i]) &&
+      !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim()) &&
+      !/^[-*]\s+/.test(lines[i]) &&
+      !/^\d+\.\s+/.test(lines[i]) &&
+      !/^>\s?/.test(lines[i])
+    ) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    html += `<p>${renderInlineMarkdown(paraLines.join("\n")).replace(/\n/g, "<br>")}</p>`;
+  }
+  closeList();
+  return html;
+}
+
 function setResponse(text, isError = false) {
-  responseEl.textContent = text;
+  if (isError) {
+    responseEl.textContent = text;
+  } else {
+    responseEl.innerHTML = renderMarkdown(text);
+  }
   responseEl.classList.toggle("error", isError);
 }
 
