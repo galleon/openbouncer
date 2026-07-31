@@ -52,6 +52,63 @@ async def test_chat_completions_calls_real_upstream(client):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_chat_completions_tolerates_upstream_vendor_fields(client):
+    # Real vLLM responses include fields this gateway doesn't define (seen
+    # live: refusal, annotations, audio, function_call, tool_calls,
+    # reasoning on the message; logprobs, stop_reason, token_ids,
+    # routed_experts on the choice; service_tier, system_fingerprint,
+    # prompt_tokens_details on the top level) -- parsing must not choke on
+    # fields it doesn't recognize.
+    upstream_body = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "nvidia/Gemma-4-26B-A4B-NVFP4",
+        "service_tier": None,
+        "system_fingerprint": "vllm-0.22.1+deadbeef",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "hi",
+                    "refusal": None,
+                    "annotations": None,
+                    "audio": None,
+                    "function_call": None,
+                    "tool_calls": [],
+                    "reasoning": None,
+                },
+                "logprobs": None,
+                "finish_reason": "stop",
+                "stop_reason": 106,
+                "token_ids": None,
+                "routed_experts": None,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": None,
+        },
+        "prompt_logprobs": None,
+    }
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=upstream_body))
+
+    response = await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/gemma4-nvfp4",
+            "messages": [{"role": "user", "content": "hello there"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "hi"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_chat_completions_image_input(client):
     route = respx.post(CHAT_URL).mock(
         return_value=httpx.Response(200, json=_upstream_response("a cat"))

@@ -20,6 +20,7 @@ from app.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ResponseChatMessage,
 )
 
 DEFAULT_NEMO_BASE_URL = "http://localhost:8000/v1"
@@ -272,7 +273,7 @@ def _bot_message_to_chat_completion(
         choices=[
             ChatCompletionChoice(
                 index=0,
-                message=ChatMessage(role="assistant", content=content),
+                message=ResponseChatMessage(role="assistant", content=content),
                 finish_reason="stop",
             )
         ],

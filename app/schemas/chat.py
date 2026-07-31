@@ -34,6 +34,20 @@ class ChatMessage(BaseModel):
     content: str | list[ContentPart]
 
 
+class ResponseChatMessage(BaseModel):
+    """An assistant message on a chat completion *response* -- unlike
+    ChatMessage (used to validate client *requests*), this deliberately
+    has no extra="forbid": real upstream providers routinely include
+    vendor extension fields on response messages (e.g. vLLM's
+    `reasoning`, `tool_calls`, `refusal`) that this gateway doesn't define
+    or use, and rejecting the whole response over fields we don't care
+    about would be wrong.
+    """
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | list[ContentPart]
+
+
 class GuardrailsOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,7 +75,7 @@ class ChatCompletionRequest(BaseModel):
 
 class ChatCompletionChoice(BaseModel):
     index: int
-    message: ChatMessage
+    message: ResponseChatMessage
     finish_reason: str = "stop"
 
 
