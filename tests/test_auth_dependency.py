@@ -3,7 +3,13 @@ import hashlib
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 
-from app.auth.dependency import AuthContext, ensure_model_allowed, require_api_key
+from app.auth.dependency import (
+    AuthContext,
+    ensure_guardrails_config_allowed,
+    ensure_model_allowed,
+    require_admin,
+    require_api_key,
+)
 from app.auth.keys import parse_key_store
 from app.auth.rate_limiter import RateLimiter
 from app.core.errors import OpenAIError
@@ -103,3 +109,48 @@ class TestEnsureModelAllowed:
         assert exc_info.value.error_type == "permission_error"
         assert exc_info.value.code == "model_not_allowed"
         assert exc_info.value.param == "model"
+
+
+class TestRequireAdmin:
+    @pytest.mark.asyncio
+    async def test_admin_key_passes_through(self):
+        auth = AuthContext(key_id="k", allowed_models=[], is_admin=True)
+        result = await require_admin(auth=auth)
+        assert result is auth
+
+    @pytest.mark.asyncio
+    async def test_non_admin_key_rejected(self):
+        auth = AuthContext(key_id="k", allowed_models=[], is_admin=False)
+        with pytest.raises(OpenAIError) as exc_info:
+            await require_admin(auth=auth)
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error_type == "permission_error"
+        assert exc_info.value.code == "admin_required"
+
+
+class TestEnsureGuardrailsConfigAllowed:
+    def test_allowed_config_passes_silently(self):
+        auth = AuthContext(key_id="k", allowed_models=[], allowed_guardrails_configs=["self_check_input"])
+        ensure_guardrails_config_allowed(auth, "self_check_input")
+
+    def test_disallowed_config_rejected(self):
+        auth = AuthContext(key_id="k", allowed_models=[], allowed_guardrails_configs=["self_check_input"])
+        with pytest.raises(OpenAIError) as exc_info:
+            ensure_guardrails_config_allowed(auth, "topic_safety")
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error_type == "permission_error"
+        assert exc_info.value.code == "guardrails_config_not_allowed"
+        assert exc_info.value.param == "guardrails.config_id"
+
+    def test_empty_allowlist_rejects_everything(self):
+        auth = AuthContext(key_id="k", allowed_models=[], allowed_guardrails_configs=[])
+        with pytest.raises(OpenAIError):
+            ensure_guardrails_config_allowed(auth, "self_check_input")
+
+    def test_none_allowlist_is_unrestricted(self):
+        # The default -- every key had this behavior before the field
+        # existed, so it must stay a no-op unless a key is explicitly
+        # restricted.
+        auth = AuthContext(key_id="k", allowed_models=[], allowed_guardrails_configs=None)
+        ensure_guardrails_config_allowed(auth, "self_check_input")
+        ensure_guardrails_config_allowed(auth, "anything-at-all")

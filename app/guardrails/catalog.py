@@ -66,6 +66,10 @@ class GuardrailsCatalogService:
     def __init__(self, *, config_store_path: str) -> None:
         self._config_store_path = config_store_path
 
+    @property
+    def config_store_path(self) -> str:
+        return self._config_store_path
+
     def list_configs(self) -> list[GuardrailsConfigSummary]:
         store_root = Path(self._config_store_path)
         if not store_root.is_dir():

@@ -78,6 +78,8 @@ The gateway listens on `http://localhost:8000` (override with `GATEWAY_PORT`).
 `./config` and `./guardrails_configs` are bind-mounted read-only into the
 container, so editing the model registry, API keys, or guardrails configs on
 the host takes effect on container restart without rebuilding the image.
+(The [Admin API](#admin-api) needs these writable instead -- opt in with
+`docker-compose.admin.yml` rather than editing this default.)
 
 Config is passed via environment variables (see `docker-compose.yml`):
 
@@ -132,6 +134,8 @@ keys:
     key_hash: <sha256 hex digest>
     allowed_models: [nvidia/qwen3.6-nvfp4]   # must be a subset of config/models.yaml's ids
     requests_per_minute: 60              # optional, defaults to 60
+    is_admin: false                      # optional, defaults to false -- see Admin API below
+    allowed_guardrails_configs: [content_safety]  # optional, defaults to unrestricted -- see Admin API below
 ```
 
 ### Rate limiting
@@ -168,6 +172,82 @@ limiting, and usage accounting.
 | Key doesn't match any configured hash | 401 | `authentication_error` | `invalid_api_key` |
 | Over `requests_per_minute` | 429 | `rate_limit_error` | `rate_limit_exceeded` |
 | Model not in the key's `allowed_models` | 403 | `permission_error` | `model_not_allowed` |
+| `guardrails.config_id` not in the key's `allowed_guardrails_configs` | 403 | `permission_error` | `guardrails_config_not_allowed` |
+| `/api/admin/*` called by a non-admin key | 403 | `permission_error` | `admin_required` |
+
+## Admin API
+
+Lets an `is_admin: true` key manage, over HTTP, two things that otherwise
+require hand-editing config files: which guardrails configs each *other*
+key is allowed to request, and the structured (bullet-list) parts of the
+bundled guardrails presets -- without restarting the gateway.
+
+### Guardrails config access per key
+
+`allowed_guardrails_configs` on a key entry (see
+[Authentication](#authentication)) works like a nullable version of
+`allowed_models`:
+
+- **Omitted / `null`** (the default -- every key had this behavior before
+  the field existed): unrestricted. The key can set
+  `guardrails.config_id` to any config_id that exists.
+- **A list** (possibly empty): the key may only use `guardrails.config_id`
+  values in that list. An empty list means "no guardrails configs at all."
+
+This check only applies when a request *explicitly* sets
+`guardrails.config_id` -- a request that omits it and relies on the
+server-side `GUARDRAILS_NEMO_DEFAULT_CONFIG_ID` default isn't affected,
+since that default is an operator choice, not something the client picked.
+
+### Enabling admin access
+
+1. Add a key with `is_admin: true` to `config/api_keys.yaml` (see
+   [Authentication](#authentication) for the key-generation command) and
+   restart the gateway -- new keys need a restart to be picked up; editing
+   an *existing* key's `allowed_guardrails_configs` through the endpoints
+   below does not.
+2. The admin endpoints work read-only without any other setup (listing
+   keys/configs). To actually **save** changes, the gateway needs write
+   access to `config/` and `guardrails_configs/` -- both are read-only in
+   the default `docker-compose.yml`. Opt in explicitly:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.admin.yml up --build
+   ```
+
+   Without this, PATCH requests fail with a clear `409
+   key_store_not_file_backed` / `500 guardrails_config_invalid` instead of
+   silently doing nothing. This is a deliberate, non-default opt-in --
+   see the comment in `docker-compose.admin.yml` for why (the container
+   runs as root with no `USER` directive, so writes make the touched
+   files root-owned on the host).
+
+### Endpoints
+
+All under `/api/admin/*`, all requiring an `is_admin: true` key:
+
+| Method | Path | Does |
+| --- | --- | --- |
+| GET | `/api/admin/keys` | List all keys (id, `is_admin`, `allowed_models`, `allowed_guardrails_configs`, `requests_per_minute` -- never `key_hash`). |
+| PATCH | `/api/admin/keys/{key_id}/guardrails-configs` | Set a key's `allowed_guardrails_configs` to an explicit list. Persists to `config/api_keys.yaml` and is live on the very next request, no restart. |
+| GET | `/api/admin/guardrails/configs` | List every discovered `config_id`, plus (for the 4 bundled presets) its current structured, editable fields. |
+| PATCH | `/api/admin/guardrails/configs/{config_id}` | Update those structured fields (e.g. `topic_safety`'s allowed-topics list). Persists to `guardrails_configs/<id>/config.yml` and invalidates that config's in-process cache, so the new rules apply on the very next request. |
+
+Only the 4 bundled presets (`self_check_input`, `self_check_output`,
+`self_check_input_output`, `topic_safety`) are structurally editable --
+each is edited via a fixed set of named sections (one per policy/topic
+list), not raw YAML, so an admin can't produce an invalid config. Adding a
+brand-new `config_id` from scratch isn't supported by this API; add one by
+hand under `guardrails_configs/` the normal way (see [`nemo_library`
+mode](#nemo_library-mode)) -- once discovered, an admin can grant keys
+access to it even though its content stays hand-edit-only.
+
+There's also a small admin panel at `/ui/admin.html` (alongside the
+existing chat-tester `/ui`) covering both of the above: a table of keys
+with checkboxes per guardrails config, and an editor per bundled preset
+with one `<textarea>` per section (one item per line). Paste in an
+`is_admin: true` key; a non-admin key gets a clean "access denied" instead
+of a page full of failed requests.
 
 ## Examples
 

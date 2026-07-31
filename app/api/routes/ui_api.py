@@ -9,9 +9,19 @@ from app.schemas.ui import (
     GuardrailsPresetItem,
     UIModelItem,
     UIModelsResponse,
+    WhoAmIResponse,
 )
 
 router = APIRouter()
+
+
+@router.get("/api/ui/whoami", response_model=WhoAmIResponse)
+async def whoami(auth: AuthContext = Depends(require_api_key)) -> WhoAmIResponse:
+    # Deliberately gated by require_api_key, not require_admin -- any valid
+    # key can call this, so the admin UI can distinguish "not admin" from
+    # "auth failed" and render a clean denied-state rather than a page full
+    # of broken 403s from every /api/admin/* call.
+    return WhoAmIResponse(key_id=auth.key_id, is_admin=auth.is_admin)
 
 
 @router.get("/api/ui/models", response_model=UIModelsResponse)

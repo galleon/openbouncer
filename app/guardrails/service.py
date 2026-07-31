@@ -127,6 +127,14 @@ class GuardrailsService(ABC):
             param="stream",
         )
 
+    def invalidate(self, config_id: str) -> None:
+        """No-op by default; overridden by backends that cache a loaded
+        config in-process (see NemoLibraryGuardrailsService). Safe to call
+        unconditionally regardless of GUARDRAILS_MODE -- backends with
+        nothing to invalidate just do nothing.
+        """
+        return None
+
 
 class DisabledGuardrailsService(GuardrailsService):
     async def process_chat_completion(
@@ -405,6 +413,14 @@ class NemoLibraryGuardrailsService(GuardrailsService):
             rails = await asyncio.to_thread(self._load_rails, config_id)
             self._rails_cache[config_id] = rails
             return rails
+
+    def invalidate(self, config_id: str) -> None:
+        # dict.pop doesn't await, so it can't interleave with a concurrent
+        # _get_rails() call mid-operation -- no need to take _load_lock
+        # here. The next request for this config_id just re-triggers
+        # _load_rails() and repopulates the cache from the (presumably
+        # just-edited) file on disk.
+        self._rails_cache.pop(config_id, None)
 
     def _load_rails(self, config_id: str) -> LLMRails:
         # config_id is validated against CONFIG_ID_PATTERN before this is

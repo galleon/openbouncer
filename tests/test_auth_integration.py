@@ -95,6 +95,76 @@ async def test_allowed_model_still_succeeds_for_restricted_key(restricted_client
 
 
 @pytest.mark.asyncio
+async def test_key_without_allowed_guardrails_configs_is_unrestricted(restricted_client):
+    # restricted_client's key (see conftest.py) has no allowed_guardrails_configs
+    # field at all -- the common case for every key that predates this
+    # feature, or that simply hasn't been restricted by an admin. It must
+    # be able to set guardrails.config_id to literally anything, exactly
+    # like before this authz check existed.
+    response = await restricted_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/gemma4-nvfp4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guardrails": {"config_id": "some-config-never-granted"},
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_forbidden_guardrails_config_rejected(guardrails_key_client):
+    # guardrails_key_client (see conftest.py) is only allowed "no_rails".
+    response = await guardrails_key_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/gemma4-nvfp4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guardrails": {"config_id": "self_check_output"},
+        },
+    )
+    assert response.status_code == 403
+    payload = response.json()
+    assert payload["error"]["type"] == "permission_error"
+    assert payload["error"]["code"] == "guardrails_config_not_allowed"
+    assert payload["error"]["param"] == "guardrails.config_id"
+
+
+@pytest.mark.asyncio
+async def test_allowed_guardrails_config_passes_authz_check(guardrails_key_client):
+    response = await guardrails_key_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/gemma4-nvfp4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guardrails": {"config_id": "no_rails"},
+        },
+    )
+    # GUARDRAILS_MODE defaults to disabled in this test process (see
+    # app.guardrails.service.load_guardrails_config), so this proves the
+    # per-key authz check let it through rather than that guardrails
+    # actually ran -- DisabledGuardrailsService ignores config_id entirely
+    # and the request falls through to the ordinary stub echo.
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_omitted_guardrails_config_id_skips_authz_check(guardrails_key_client):
+    # guardrails_key_client is only allowed "no_rails" -- omitting
+    # config_id relies on the server-side default (an operator choice, not
+    # client-selectable), so no per-key check applies.
+    response = await guardrails_key_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "local/gemma4-nvfp4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guardrails": {"enabled": True},
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_models_endpoint_filtered_to_allowed_models(restricted_client):
     response = await restricted_client.get("/v1/models")
     assert response.status_code == 200

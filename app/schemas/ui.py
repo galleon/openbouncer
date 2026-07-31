@@ -23,3 +23,8 @@ class GuardrailsPresetItem(BaseModel):
 class GuardrailsCatalogResponse(BaseModel):
     configs: list[GuardrailsConfigItem]
     presets: list[GuardrailsPresetItem]
+
+
+class WhoAmIResponse(BaseModel):
+    key_id: str
+    is_admin: bool

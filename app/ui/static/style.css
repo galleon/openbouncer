@@ -56,6 +56,26 @@ header h1 {
   margin: 0;
 }
 
+.header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.page-nav a {
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+}
+
+.page-nav a:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 main {
   max-width: 720px;
   margin: 2rem auto;
@@ -287,4 +307,113 @@ button:disabled {
 
 #response a {
   color: var(--accent);
+}
+
+/* admin.html */
+
+.admin-status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.admin-status.error {
+  color: var(--error);
+}
+
+.admin-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.admin-section h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.35rem;
+}
+
+.admin-hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0 0 1rem;
+}
+
+.admin-hint.error {
+  color: var(--error);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.admin-table th,
+.admin-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.admin-config-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.admin-checkbox {
+  font-size: 0.85rem;
+}
+
+.admin-row-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+}
+
+.admin-row-status.error {
+  color: var(--error);
+}
+
+.admin-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-card:last-child {
+  margin-bottom: 0;
+}
+
+.admin-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+.admin-card .field {
+  margin-bottom: 0.75rem;
+}
+
+.admin-card textarea {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+  font-size: 0.85rem;
+  resize: vertical;
 }

@@ -18,6 +18,11 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 class AuthContext:
     key_id: str
     allowed_models: list[str]
+    is_admin: bool = False
+    # None means unrestricted -- see APIKeyRecord.allowed_guardrails_configs
+    # in app.auth.keys for why this is nullable rather than defaulting to
+    # an empty (deny-everything) list.
+    allowed_guardrails_configs: list[str] | None = None
 
 
 def _redact(raw_key: str) -> str:
@@ -72,7 +77,32 @@ async def require_api_key(
             code="rate_limit_exceeded",
         )
 
-    return AuthContext(key_id=record.id, allowed_models=list(record.allowed_models))
+    return AuthContext(
+        key_id=record.id,
+        allowed_models=list(record.allowed_models),
+        is_admin=record.is_admin,
+        allowed_guardrails_configs=(
+            list(record.allowed_guardrails_configs)
+            if record.allowed_guardrails_configs is not None
+            else None
+        ),
+    )
+
+
+async def require_admin(auth: AuthContext = Depends(require_api_key)) -> AuthContext:
+    if not auth.is_admin:
+        logger.warning(
+            "Forbidden: key_id=%s lacks admin access [request_id=%s]",
+            auth.key_id,
+            get_request_id(),
+        )
+        raise OpenAIError(
+            "Your API key does not have admin access.",
+            status_code=403,
+            error_type="permission_error",
+            code="admin_required",
+        )
+    return auth
 
 
 def ensure_model_allowed(auth: AuthContext, model: str) -> None:
@@ -89,4 +119,24 @@ def ensure_model_allowed(auth: AuthContext, model: str) -> None:
             error_type="permission_error",
             param="model",
             code="model_not_allowed",
+        )
+
+
+def ensure_guardrails_config_allowed(auth: AuthContext, config_id: str) -> None:
+    if auth.allowed_guardrails_configs is None:
+        # Unrestricted -- see APIKeyRecord.allowed_guardrails_configs.
+        return
+    if config_id not in auth.allowed_guardrails_configs:
+        logger.warning(
+            "Forbidden guardrails config: key_id=%s requested config_id=%s [request_id=%s]",
+            auth.key_id,
+            config_id,
+            get_request_id(),
+        )
+        raise OpenAIError(
+            f"Your API key does not have access to the guardrails config `{config_id}`.",
+            status_code=403,
+            error_type="permission_error",
+            param="guardrails.config_id",
+            code="guardrails_config_not_allowed",
         )

@@ -6,7 +6,12 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.auth.dependency import AuthContext, ensure_model_allowed, require_api_key
+from app.auth.dependency import (
+    AuthContext,
+    ensure_guardrails_config_allowed,
+    ensure_model_allowed,
+    require_api_key,
+)
 from app.auth.usage import UsageTracker, get_usage_tracker
 from app.core.errors import OpenAIError
 from app.core.registry import ModelRegistry, get_model_registry, resolve_api_key
@@ -38,6 +43,16 @@ def _count_tokens(text: str) -> int:
 
 def _guardrails_requested(request: ChatCompletionRequest) -> bool:
     return request.guardrails is not None and request.guardrails.enabled
+
+
+def _requested_config_id(request: ChatCompletionRequest) -> str | None:
+    # Only meaningful when the client explicitly names a config_id -- an
+    # omitted one falls back to the server-side GUARDRAILS_NEMO_DEFAULT_CONFIG_ID,
+    # which is an operator choice, not something the client selected, so no
+    # per-key allowlist check applies to it.
+    if not _guardrails_requested(request):
+        return None
+    return request.guardrails.config_id
 
 
 async def _relay_stream(
@@ -81,6 +96,9 @@ async def create_chat_completion(
             code="model_not_found",
         )
     ensure_model_allowed(auth, request.model)
+    requested_config_id = _requested_config_id(request)
+    if requested_config_id is not None:
+        ensure_guardrails_config_allowed(auth, requested_config_id)
 
     if request.stream:
         guardrails_stream = (

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenBouncer Admin</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-title">
+        <h1>OpenBouncer Admin</h1>
+        <nav class="page-nav"><a href="index.html">Tester</a></nav>
+      </div>
+      <label class="api-key-field">
+        <span>API key</span>
+        <input
+          type="password"
+          id="api-key"
+          placeholder="sk-..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </label>
+    </header>
+
+    <main>
+      <p id="admin-status" class="admin-status" role="status"></p>
+
+      <section id="keys-section" class="admin-section" hidden>
+        <h2>API keys</h2>
+        <p class="admin-hint">
+          Which guardrails configs each key is allowed to request via
+          <code>guardrails.config_id</code>.
+        </p>
+        <div id="keys-table"></div>
+      </section>
+
+      <section id="guardrails-section" class="admin-section" hidden>
+        <h2>Guardrails configs</h2>
+        <p class="admin-hint">
+          Edit the structured, editable parts of each bundled preset. One item per line.
+        </p>
+        <div id="guardrails-cards"></div>
+      </section>
+    </main>
+
+    <script src="common.js"></script>
+    <script src="admin.js"></script>
+  </body>
+</html>

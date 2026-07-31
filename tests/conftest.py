@@ -21,6 +21,10 @@ keys:
     allowed_models:
       - local/gemma4-nvfp4
       - local/bge-m3
+    allowed_guardrails_configs:
+      - no_rails
+      - self_check_output
+      - does_not_exist
     requests_per_minute: 1000000
 """
 
@@ -46,6 +50,34 @@ keys:
     key_hash: {LOW_LIMIT_HASH}
     allowed_models: [local/gemma4-nvfp4]
     requests_per_minute: 2
+"""
+
+ADMIN_API_KEY = "sk-admin-abcdefabcdefabcdefabcdef"
+ADMIN_API_KEY_HASH = hashlib.sha256(ADMIN_API_KEY.encode()).hexdigest()
+UNRESTRICTED_KEY_HASH = hashlib.sha256(b"sk-unrestricted-key").hexdigest()
+ADMIN_STORE_YAML = f"""
+keys:
+  - id: admin-key
+    key_hash: {ADMIN_API_KEY_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    is_admin: true
+    allowed_guardrails_configs: [no_rails, self_check_output]
+    requests_per_minute: 1000000
+  - id: unrestricted-key
+    key_hash: {UNRESTRICTED_KEY_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    requests_per_minute: 1000000
+"""
+
+GUARDRAILS_KEY = "sk-guardrails-abcdefabcdefabcdefabcdef"
+GUARDRAILS_KEY_HASH = hashlib.sha256(GUARDRAILS_KEY.encode()).hexdigest()
+GUARDRAILS_KEY_STORE_YAML = f"""
+keys:
+  - id: guardrails-key
+    key_hash: {GUARDRAILS_KEY_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    allowed_guardrails_configs: [no_rails]
+    requests_per_minute: 1000000
 """
 
 
@@ -100,3 +132,35 @@ async def low_limit_client():
     finally:
         app.dependency_overrides.pop(get_key_store, None)
         app.dependency_overrides.pop(get_rate_limiter, None)
+
+
+@pytest.fixture
+async def admin_client():
+    store = parse_key_store(ADMIN_STORE_YAML)
+    app.dependency_overrides[get_key_store] = lambda: store
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {ADMIN_API_KEY}"},
+        ) as ac:
+            yield ac
+    finally:
+        app.dependency_overrides.pop(get_key_store, None)
+
+
+@pytest.fixture
+async def guardrails_key_client():
+    store = parse_key_store(GUARDRAILS_KEY_STORE_YAML)
+    app.dependency_overrides[get_key_store] = lambda: store
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {GUARDRAILS_KEY}"},
+        ) as ac:
+            yield ac
+    finally:
+        app.dependency_overrides.pop(get_key_store, None)

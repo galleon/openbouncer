@@ -1,6 +1,6 @@
 "use strict";
 
-const API_KEY_STORAGE_KEY = "openbouncer_api_key";
+// API_KEY_STORAGE_KEY, escapeHtml, setStatusText come from common.js.
 
 const apiKeyInput = document.getElementById("api-key");
 const modelSelect = document.getElementById("model");
@@ -18,27 +18,14 @@ const statusEl = document.getElementById("status");
 let presetExampleMessages = {};
 
 function setStatus(message, isError = false) {
-  statusEl.textContent = message;
-  statusEl.classList.toggle("error", isError);
+  setStatusText(statusEl, message, isError);
 }
 
 // Minimal, self-contained Markdown -> HTML renderer for the response box.
-// Deliberately not a CDN-loaded library: this page holds a live bearer API
-// key (in the API-key field / localStorage), so pulling in third-party JS
-// here would be a real exfiltration risk if that script were ever
-// compromised or MITM'd. Every line is HTML-escaped before any markdown
-// syntax is turned into tags, and link hrefs are restricted to http(s)/
-// mailto, so model output (which is untrusted -- e.g. a prompt-injected
-// response) can't inject live markup or script.
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
+// Every line is HTML-escaped (via common.js's escapeHtml) before any
+// markdown syntax is turned into tags, and link hrefs are restricted to
+// http(s)/mailto, so model output (which is untrusted -- e.g. a
+// prompt-injected response) can't inject live markup or script.
 function renderInlineMarkdown(text) {
   let out = escapeHtml(text);
   out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
@@ -167,15 +154,6 @@ function setResponse(text, isError = false) {
     responseEl.innerHTML = renderMarkdown(text);
   }
   responseEl.classList.toggle("error", isError);
-}
-
-function formatError(body) {
-  if (body && body.error && body.error.message) {
-    const parts = [body.error.message];
-    if (body.error.type) parts.push(`(${body.error.type}${body.error.code ? `/${body.error.code}` : ""})`);
-    return parts.join(" ");
-  }
-  return JSON.stringify(body, null, 2);
 }
 
 function currentApiKey() {

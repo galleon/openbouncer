@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import re
@@ -6,6 +7,8 @@ from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.atomic_write import atomic_write_text
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "api_keys.yaml"
 
@@ -38,6 +41,14 @@ class APIKeyRecord(BaseModel):
     # model_not_allowed), just not at config-load time.
     allowed_models: list[str] = Field(min_length=1)
     requests_per_minute: int = Field(default=DEFAULT_REQUESTS_PER_MINUTE, gt=0)
+    is_admin: bool = False
+    # None (the default -- and what every key had before this field existed)
+    # means unrestricted: any config_id may be requested, exactly like
+    # before this field was introduced, so adding it is a no-op for
+    # existing configs. A key only becomes restricted once an admin
+    # explicitly sets this to a (possibly empty) list via the admin API --
+    # at that point it's an opt-in allowlist, same idea as allowed_models.
+    allowed_guardrails_configs: list[str] | None = None
 
     @field_validator("key_hash")
     @classmethod
@@ -45,6 +56,22 @@ class APIKeyRecord(BaseModel):
         if not _SHA256_HEX_PATTERN.match(value):
             raise ValueError("key_hash must be a 64-character hex-encoded SHA-256 digest")
         return value.lower()
+
+    @field_validator("allowed_guardrails_configs")
+    @classmethod
+    def _guardrails_config_ids_must_be_well_formed(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        from app.guardrails.service import CONFIG_ID_PATTERN
+
+        for config_id in value:
+            if not CONFIG_ID_PATTERN.match(config_id):
+                raise ValueError(
+                    f"Invalid guardrails config_id in allowed_guardrails_configs: {config_id!r}"
+                )
+        return value
 
 
 class APIKeyStoreConfig(BaseModel):
@@ -122,3 +149,66 @@ def load_key_store() -> KeyStore:
 @lru_cache
 def get_key_store() -> KeyStore:
     return load_key_store()
+
+
+class AdminPersistenceError(RuntimeError):
+    """Raised when the key store isn't file-backed, so an admin write has
+    nowhere durable to go (OPENBOUNCER_API_KEYS_YAML always wins over the
+    file, per _resolve_raw_yaml -- writing the file would be silently
+    ignored on next load)."""
+
+
+# Serializes read-modify-write across concurrent admin requests -- without
+# this, two overlapping PATCHes could both read the pre-change file and the
+# second write would clobber the first's update.
+_write_lock = asyncio.Lock()
+
+
+def _writable_path() -> Path:
+    if os.environ.get(CONFIG_YAML_ENV_VAR):
+        raise AdminPersistenceError(
+            f"Cannot persist API key changes: {CONFIG_YAML_ENV_VAR} is set, so the key "
+            "store is loaded from an inline environment variable and a file write here "
+            "would be silently ignored on next load (the inline env var always wins -- "
+            f"see _resolve_raw_yaml()). Unset it or switch this deployment to "
+            f"{CONFIG_PATH_ENV_VAR} pointing at a real file."
+        )
+    explicit_path = os.environ.get(CONFIG_PATH_ENV_VAR)
+    return Path(explicit_path) if explicit_path else DEFAULT_CONFIG_PATH
+
+
+async def update_key_allowed_guardrails_configs(
+    key_id: str, allowed_guardrails_configs: list[str]
+) -> APIKeyRecord:
+    """Persists a key's allowed_guardrails_configs to disk and invalidates
+    get_key_store()'s cache so the change is live on the very next request
+    -- no restart needed. Raises KeyError if key_id doesn't exist,
+    AdminPersistenceError if the store isn't file-backed.
+    """
+    async with _write_lock:
+        path = _writable_path()
+        raw = path.read_text() if path.exists() else "keys: []\n"
+        config = APIKeyStoreConfig(**(yaml.safe_load(raw) or {}))
+        if not any(k.id == key_id for k in config.keys):
+            raise KeyError(key_id)
+
+        new_keys = [
+            k.model_copy(update={"allowed_guardrails_configs": list(allowed_guardrails_configs)})
+            if k.id == key_id
+            else k
+            for k in config.keys
+        ]
+        # Re-validate the whole store (not just the one record) before
+        # writing, so a bug here can't persist an inconsistent file.
+        new_config = APIKeyStoreConfig(keys=new_keys)
+        # exclude_none so keys that were never restricted (the common case)
+        # keep round-tripping without gaining an explicit
+        # `allowed_guardrails_configs: null` line just because some *other*
+        # key in the file got edited.
+        new_yaml = yaml.safe_dump(
+            new_config.model_dump(mode="json", exclude_none=True), sort_keys=False
+        )
+        atomic_write_text(path, new_yaml)
+
+        get_key_store.cache_clear()
+        return next(k for k in new_keys if k.id == key_id)
