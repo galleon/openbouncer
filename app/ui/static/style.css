@@ -302,6 +302,41 @@ button:disabled {
   color: var(--accent);
 }
 
+/* app.js -- $...$/$$...$$ math (see renderLatex) */
+
+.formula {
+  font-family: Cambria, "Times New Roman", serif;
+}
+
+.formula-inline {
+  padding: 0 0.1em;
+}
+
+.formula-display {
+  display: block;
+  text-align: center;
+  margin: 0.75rem 0;
+  font-size: 1.05em;
+}
+
+.frac {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: middle;
+  text-align: center;
+  margin: 0 0.15em;
+  line-height: 1.15;
+}
+
+.frac-num {
+  border-bottom: 1px solid currentColor;
+  padding: 0 0.2em 0.1em;
+}
+
+.frac-den {
+  padding: 0.1em 0.2em 0;
+}
+
 /* admin.html */
 
 /* Wider than the shared `main` rule above: the keys table has 8 columns
@@ -606,13 +641,33 @@ button:disabled {
 
 .timeseries-chart {
   width: 100%;
-  height: 220px;
+  height: 260px;
   display: block;
 }
 
 .timeseries-axis {
   stroke: var(--border);
   stroke-width: 1;
+}
+
+.timeseries-gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.timeseries-axis-label {
+  fill: var(--muted);
+  font-size: 8px;
+}
+
+.timeseries-axis-label-x {
+  text-anchor: middle;
+}
+
+.timeseries-axis-label-y {
+  text-anchor: end;
+  dominant-baseline: middle;
 }
 
 .timeseries-legend {

@@ -3,8 +3,8 @@
 // Hand-rolled SVG charts -- no charting library (see common.js for why: no
 // third-party JS on pages holding a live bearer key). Two functions:
 // renderSparkline (a tiny single-line trend, used in stat cards) and
-// renderTimeSeries (a stacked area chart, used for "Request volume by
-// model"). Both build real SVG DOM nodes (not innerHTML string
+// renderTimeSeries (a stacked bar chart with axes, used for "Request
+// volume by model"). Both build real SVG DOM nodes (not innerHTML string
 // interpolation) and size themselves via viewBox so they scale with their
 // container.
 
@@ -57,16 +57,50 @@ function renderSparkline(container, values) {
   container.appendChild(svg);
 }
 
+// Picks at most maxTicks evenly-spaced indices out of [0, count) --
+// showing a tick per bucket would be unreadable once a range has dozens
+// of buckets (e.g. 96 for 24h at 15m step).
+function pickTickIndices(count, maxTicks) {
+  if (count <= maxTicks) {
+    return Array.from({ length: count }, (_, i) => i);
+  }
+  const step = (count - 1) / (maxTicks - 1);
+  const indices = new Set();
+  for (let i = 0; i < maxTicks; i++) {
+    indices.add(Math.round(i * step));
+  }
+  return Array.from(indices);
+}
+
+// bucketSeconds (the gap between consecutive buckets) decides the
+// granularity actually worth showing -- minutes/hours within a day,
+// otherwise just the date, matching whatever step the backend chose for
+// the selected range (app/api/routes/activity.py's _RANGE_CONFIG).
+function formatAxisTimestamp(unixSeconds, bucketSeconds) {
+  const date = new Date(unixSeconds * 1000);
+  if (bucketSeconds < 24 * 3600) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatAxisValue(v) {
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
 // data: { series: [{ label, points: [{t, v}, ...] }], height }
-// Renders a stacked area chart. Points across series don't need to share
-// exactly the same timestamps -- missing points on the union grid are
-// treated as 0.
+// Renders a stacked bar chart (one stack per time bucket) with X (time)
+// and Y (value) axes. Points across series don't need to share exactly
+// the same timestamps -- missing points on the union grid are treated as
+// 0, and the bucket width is inferred from the gap between the first two
+// timestamps actually present.
 function renderTimeSeries(container, data) {
   container.innerHTML = "";
   const series = (data && data.series) || [];
-  const width = 600;
-  const height = data.height || 220;
-  const padding = { top: 10, right: 10, bottom: 24, left: 10 };
+  const width = 640;
+  const height = data.height || 260;
+  const padding = { top: 10, right: 10, bottom: 28, left: 44 };
 
   const svg = svgEl("svg", {
     viewBox: `0 0 ${width} ${height}`,
@@ -83,6 +117,7 @@ function renderTimeSeries(container, data) {
   const timestamps = Array.from(
     new Set(nonEmptySeries.flatMap((s) => s.points.map((p) => p.t))),
   ).sort((a, b) => a - b);
+  const bucketSeconds = timestamps.length > 1 ? timestamps[1] - timestamps[0] : 3600;
 
   const aligned = nonEmptySeries.map((s) => {
     const byTime = new Map(s.points.map((p) => [p.t, p.v]));
@@ -96,12 +131,36 @@ function renderTimeSeries(container, data) {
 
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
-  const stepX = timestamps.length > 1 ? plotWidth / (timestamps.length - 1) : 0;
+  const stepX = plotWidth / timestamps.length;
+  const barWidth = Math.max(1, stepX * 0.7);
 
-  const xAt = (i) => padding.left + i * stepX;
+  const xAt = (i) => padding.left + i * stepX + stepX / 2;
   const yAt = (v) => padding.top + plotHeight - (v / stackedMax) * plotHeight;
 
-  // Baseline.
+  // Y-axis gridlines + value labels.
+  const yTickCount = 4;
+  for (let t = 0; t <= yTickCount; t++) {
+    const value = (stackedMax / yTickCount) * t;
+    const y = yAt(value);
+    svg.appendChild(
+      svgEl("line", {
+        x1: padding.left,
+        y1: y.toFixed(2),
+        x2: width - padding.right,
+        y2: y.toFixed(2),
+        class: "timeseries-gridline",
+      }),
+    );
+    const label = svgEl("text", {
+      x: padding.left - 6,
+      y: y.toFixed(2),
+      class: "timeseries-axis-label timeseries-axis-label-y",
+    });
+    label.textContent = formatAxisValue(value);
+    svg.appendChild(label);
+  }
+
+  // X-axis baseline.
   svg.appendChild(
     svgEl("line", {
       x1: padding.left,
@@ -112,27 +171,38 @@ function renderTimeSeries(container, data) {
     }),
   );
 
+  // Stacked bars, one stack per bucket.
   let cumulative = timestamps.map(() => 0);
   aligned.forEach((s, seriesIndex) => {
-    const nextCumulative = cumulative.map((c, i) => c + s.values[i]);
-
-    const topPoints = timestamps.map((_, i) => [xAt(i), yAt(nextCumulative[i])]);
-    const bottomPoints = timestamps.map((_, i) => [xAt(i), yAt(cumulative[i])]).reverse();
-    const areaPoints = topPoints.concat(bottomPoints);
-    const areaPath =
-      areaPoints.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ") + " Z";
-
     const color = colorFor(seriesIndex);
-    const area = svgEl("path", { d: areaPath, fill: color, "fill-opacity": "0.55", stroke: "none" });
-    svg.appendChild(area);
-
-    const linePath = topPoints
-      .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`)
-      .join(" ");
-    svg.appendChild(svgEl("path", { d: linePath, fill: "none", stroke: color, "stroke-width": "1.5" }));
-
-    cumulative = nextCumulative;
+    timestamps.forEach((_, i) => {
+      const v = s.values[i];
+      if (v <= 0) return;
+      const barTop = yAt(cumulative[i] + v);
+      const barBottom = yAt(cumulative[i]);
+      svg.appendChild(
+        svgEl("rect", {
+          x: (xAt(i) - barWidth / 2).toFixed(2),
+          y: barTop.toFixed(2),
+          width: barWidth.toFixed(2),
+          height: Math.max(0, barBottom - barTop).toFixed(2),
+          fill: color,
+        }),
+      );
+    });
+    cumulative = cumulative.map((c, i) => c + s.values[i]);
   });
+
+  // X-axis tick labels -- a bounded subset of buckets, not all of them.
+  for (const i of pickTickIndices(timestamps.length, 6)) {
+    const label = svgEl("text", {
+      x: xAt(i).toFixed(2),
+      y: padding.top + plotHeight + 16,
+      class: "timeseries-axis-label timeseries-axis-label-x",
+    });
+    label.textContent = formatAxisTimestamp(timestamps[i], bucketSeconds);
+    svg.appendChild(label);
+  }
 
   container.appendChild(svg);
 
