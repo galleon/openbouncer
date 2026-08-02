@@ -6,25 +6,8 @@
     <title>OpenBouncer Admin</title>
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
-    <header>
-      <div class="header-title">
-        <h1>OpenBouncer Admin</h1>
-        <nav class="page-nav"><a href="index.html">Tester</a></nav>
-      </div>
-      <label class="api-key-field">
-        <span>API key</span>
-        <input
-          type="password"
-          id="api-key"
-          placeholder="sk-..."
-          autocomplete="off"
-          spellcheck="false"
-        />
-      </label>
-    </header>
-
-    <main class="admin-main">
+  <body data-nav="keys" data-page-title="Admin">
+    <main id="page-main" class="admin-main">
       <p id="admin-status" class="admin-status" role="status"></p>
 
       <section id="keys-section" class="admin-section" hidden>
@@ -72,6 +55,7 @@
     </main>
 
     <script src="common.js"></script>
+    <script src="shell.js"></script>
     <script src="admin.js"></script>
   </body>
 </html>
