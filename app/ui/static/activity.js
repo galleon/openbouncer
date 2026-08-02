@@ -102,6 +102,7 @@ function renderRequestsChart(requestsByModel) {
   }
   renderTimeSeries(requestsChartEl, {
     series: requestsByModel.map((s) => ({ label: s.model, points: s.points })),
+    yLabel: "Requests",
   });
 }
 

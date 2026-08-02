@@ -41,7 +41,12 @@ def _matrix(series: dict[str, list[tuple[int, str]]]) -> dict:
 
 def _prometheus_side_effect(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/v1/query_range":
-        return httpx.Response(200, json=_matrix({"local/gemma4-nvfp4": [(1700000000, "1")]}))
+        # A single real sample at the window's end -- the endpoint now
+        # backfills the rest of the grid with zeros, so the fixed timestamp
+        # this used to hardcode would just fall outside the real (now-based)
+        # window and get silently dropped by that backfill.
+        end = int(float(request.url.params["end"]))
+        return httpx.Response(200, json=_matrix({"local/gemma4-nvfp4": [(end, "1")]}))
 
     query = request.url.params["query"]
     if "topk" in query and "key_id" in query:
@@ -119,7 +124,12 @@ async def test_overview_shapes_prometheus_data(admin_client, prometheus_configur
 
     assert len(body["requests_by_model"]) == 1
     assert body["requests_by_model"][0]["model"] == "local/gemma4-nvfp4"
-    assert body["requests_by_model"][0]["points"] == [{"t": 1700000000, "v": 1.0}]
+    points = body["requests_by_model"][0]["points"]
+    # 24h range at a 1h step backfills to 25 grid points (start..end inclusive);
+    # only the last (the mocked sample) is non-zero.
+    assert len(points) == 25
+    assert [p["v"] for p in points[:-1]] == [0.0] * 24
+    assert points[-1]["v"] == 1.0
 
     assert body["top_keys_by_tokens"] == [{"key_id": "admin", "tokens": 500.0}]
     assert body["top_models_by_requests"] == [{"model": "local/gemma4-nvfp4", "requests": 10.0}]

@@ -81,7 +81,9 @@ function pickTickIndices(count, maxTicks) {
 function formatAxisTimestamp(unixSeconds, totalSpanSeconds) {
   const date = new Date(unixSeconds * 1000);
   if (totalSpanSeconds < 24 * 3600) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    // 24h clock, not 12h -- so the day boundary (23:00 -> 00:00) is
+    // obvious at a glance instead of hiding behind an AM/PM flip.
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   }
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
@@ -91,18 +93,19 @@ function formatAxisValue(v) {
   return Number.isInteger(v) ? String(v) : v.toFixed(2);
 }
 
-// data: { series: [{ label, points: [{t, v}, ...] }], height }
+// data: { series: [{ label, points: [{t, v}, ...] }], height, yLabel }
 // Renders a stacked bar chart (one stack per time bucket) with X (time)
-// and Y (value) axes. Points across series don't need to share exactly
-// the same timestamps -- missing points on the union grid are treated as
-// 0, and the bucket width is inferred from the gap between the first two
-// timestamps actually present.
+// and Y (value, titled with yLabel so the unit isn't a bare number) axes.
+// Points across series don't need to share exactly the same timestamps --
+// missing points on the union grid are treated as 0, and the bucket width
+// is inferred from the gap between the first two timestamps actually
+// present.
 function renderTimeSeries(container, data) {
   container.innerHTML = "";
   const series = (data && data.series) || [];
   const width = 640;
   const height = data.height || 260;
-  const padding = { top: 10, right: 10, bottom: 28, left: 44 };
+  const padding = { top: 10, right: 10, bottom: 28, left: 56 };
 
   const svg = svgEl("svg", {
     viewBox: `0 0 ${width} ${height}`,
@@ -162,6 +165,19 @@ function renderTimeSeries(container, data) {
     });
     label.textContent = formatAxisValue(value);
     svg.appendChild(label);
+  }
+
+  // Y-axis title (the unit) -- tick values alone are just bare numbers.
+  if (data.yLabel) {
+    const axisTitleY = padding.top + plotHeight / 2;
+    const title = svgEl("text", {
+      x: 12,
+      y: axisTitleY,
+      class: "timeseries-axis-title",
+      transform: `rotate(-90 12 ${axisTitleY})`,
+    });
+    title.textContent = data.yLabel;
+    svg.appendChild(title);
   }
 
   // X-axis baseline.

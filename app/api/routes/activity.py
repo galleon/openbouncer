@@ -20,18 +20,35 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# step: bucket width for the time-series chart, kept coarse enough that a
-# browser-rendered SVG chart doesn't choke on point count. The by-model
-# series uses increase() over a window equal to step, so each bar is an
-# actual request count for that bucket (not a rate) -- matches the
-# stacked-bar chart's semantics and keeps Y-axis values readable instead of
-# vanishingly small per-second rates.
+# step/step_seconds: bucket width for the time-series chart, kept coarse
+# enough that a browser-rendered SVG chart doesn't choke on point count --
+# 24h buckets by the hour, 30d buckets by the day, so each range plots a
+# sensible number of bars. The by-model series uses increase() over a
+# window equal to step, so each bar is an actual request count for that
+# bucket (not a rate) -- matches the stacked-bar chart's semantics and
+# keeps Y-axis values readable instead of vanishingly small per-second
+# rates.
 _RANGE_CONFIG = {
-    "1h": {"seconds": 3600, "step": "1m"},
-    "24h": {"seconds": 86400, "step": "15m"},
-    "7d": {"seconds": 7 * 86400, "step": "2h"},
-    "30d": {"seconds": 30 * 86400, "step": "6h"},
+    "1h": {"seconds": 3600, "step": "1m", "step_seconds": 60},
+    "24h": {"seconds": 86400, "step": "1h", "step_seconds": 3600},
+    "7d": {"seconds": 7 * 86400, "step": "2h", "step_seconds": 7200},
+    "30d": {"seconds": 30 * 86400, "step": "1d", "step_seconds": 86400},
 }
+
+
+def _fill_grid(
+    points: list[TimeSeriesPoint], start: int, end: int, step_seconds: int
+) -> list[TimeSeriesPoint]:
+    """Reindexes a sparse series onto every bucket from start to end, filling
+    gaps with 0 -- Prometheus only emits a point where increase() actually
+    had samples to work with, so a model used only in the last day of a
+    30-day range would otherwise produce a chart that silently starts on
+    whatever day traffic began instead of spanning the full requested range.
+    """
+    by_t = {p.t: p.v for p in points}
+    return [
+        TimeSeriesPoint(t=t, v=by_t.get(t, 0.0)) for t in range(start, end + 1, step_seconds)
+    ]
 
 
 def _instant_value(result: list[dict]) -> float | None:
@@ -63,7 +80,14 @@ async def activity_overview(
         )
 
     config = _RANGE_CONFIG[window]
+    step_seconds = config["step_seconds"]
     now = time.time()
+    # Align the query window to whole buckets (e.g. the top of the hour, or
+    # midnight) instead of "now" itself, so grid points line up exactly
+    # with what _fill_grid below expects and chart ticks land on round
+    # boundaries instead of e.g. "14:37".
+    range_end = (int(now) // step_seconds) * step_seconds
+    range_start = range_end - config["seconds"]
 
     # A fixed set of PromQL queries -- never client-supplied -- run in
     # parallel since they're independent reads against the same Prometheus.
@@ -93,8 +117,8 @@ async def activity_overview(
             ),
             prometheus.query_range(
                 f"sum(increase(openbouncer_chat_completions_total[{config['step']}])) by (model)",
-                start=now - config["seconds"],
-                end=now,
+                start=range_start,
+                end=range_end,
                 step=config["step"],
             ),
             prometheus.query(
@@ -129,10 +153,15 @@ async def activity_overview(
     requests_by_model = [
         ModelTimeSeries(
             model=series.get("metric", {}).get("model", "unknown"),
-            points=[
-                TimeSeriesPoint(t=int(float(t)), v=float(v))
-                for t, v in series.get("values", [])
-            ],
+            points=_fill_grid(
+                [
+                    TimeSeriesPoint(t=int(float(t)), v=float(v))
+                    for t, v in series.get("values", [])
+                ],
+                range_start,
+                range_end,
+                step_seconds,
+            ),
         )
         for series in by_model_result
     ]

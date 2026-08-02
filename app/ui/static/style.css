@@ -670,6 +670,12 @@ button:disabled {
   dominant-baseline: middle;
 }
 
+.timeseries-axis-title {
+  fill: var(--muted);
+  font-size: 8px;
+  text-anchor: middle;
+}
+
 .timeseries-legend {
   display: flex;
   flex-wrap: wrap;
