@@ -302,39 +302,13 @@ button:disabled {
   color: var(--accent);
 }
 
-/* app.js -- $...$/$$...$$ math (see renderLatex) */
+/* app.js -- $...$/$$...$$ math is rendered by vendored KaTeX (its own CSS
+   handles layout/spacing); this is only the rare renderMath() catch
+   fallback for input KaTeX couldn't even produce an error node for. */
 
-.formula {
-  font-family: Cambria, "Times New Roman", serif;
-}
-
-.formula-inline {
-  padding: 0 0.1em;
-}
-
-.formula-display {
-  display: block;
-  text-align: center;
-  margin: 0.75rem 0;
-  font-size: 1.05em;
-}
-
-.frac {
-  display: inline-flex;
-  flex-direction: column;
-  vertical-align: middle;
-  text-align: center;
-  margin: 0 0.15em;
-  line-height: 1.15;
-}
-
-.frac-num {
-  border-bottom: 1px solid currentColor;
-  padding: 0 0.2em 0.1em;
-}
-
-.frac-den {
-  padding: 0.1em 0.2em 0;
+.formula-fallback {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color: var(--muted);
 }
 
 /* admin.html */
