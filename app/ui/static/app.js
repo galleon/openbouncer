@@ -98,6 +98,44 @@ function renderInlineMarkdown(text) {
   return out;
 }
 
+// Splits a GFM table row on unescaped "|", dropping the optional leading/
+// trailing pipe and unescaping "\|" within cells.
+function splitTableRow(line) {
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|") && !trimmed.endsWith("\\|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
+}
+
+// A separator row is only ":"/"-" cells (e.g. "| :--- | ---: | :---: |") --
+// this is what actually identifies a table (vs. two lines that merely
+// happen to contain "|"), so it's checked before treating anything as one.
+function isTableSeparatorRow(line) {
+  if (!line.includes("-")) return false;
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+function tableColumnAlignment(sepCell) {
+  const left = sepCell.startsWith(":");
+  const right = sepCell.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return null;
+}
+
+function renderTableRow(cells, alignments, tag) {
+  const tds = cells
+    .map((cell, i) => {
+      const align = alignments[i];
+      const style = align ? ` style="text-align:${align}"` : "";
+      return `<${tag}${style}>${renderInlineMarkdown(cell)}</${tag}>`;
+    })
+    .join("");
+  return `<tr>${tds}</tr>`;
+}
+
 function renderMarkdown(source) {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   let html = "";
@@ -161,6 +199,20 @@ function renderMarkdown(source) {
       continue;
     }
 
+    if (line.includes("|") && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1])) {
+      closeList();
+      const headerCells = splitTableRow(line);
+      const alignments = splitTableRow(lines[i + 1]).map(tableColumnAlignment);
+      i += 2;
+      let bodyRows = "";
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
+        bodyRows += renderTableRow(splitTableRow(lines[i]), alignments, "td");
+        i++;
+      }
+      html += `<table><thead>${renderTableRow(headerCells, alignments, "th")}</thead><tbody>${bodyRows}</tbody></table>`;
+      continue;
+    }
+
     const ulMatch = line.match(/^[-*]\s+(.*)$/);
     if (ulMatch) {
       if (listType !== "ul") {
@@ -196,7 +248,8 @@ function renderMarkdown(source) {
       !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim()) &&
       !/^[-*]\s+/.test(lines[i]) &&
       !/^\d+\.\s+/.test(lines[i]) &&
-      !/^>\s?/.test(lines[i])
+      !/^>\s?/.test(lines[i]) &&
+      !(lines[i].includes("|") && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1]))
     ) {
       paraLines.push(lines[i]);
       i++;

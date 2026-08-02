@@ -298,6 +298,27 @@ button:disabled {
   margin: 1rem 0;
 }
 
+#response table {
+  border-collapse: collapse;
+  margin: 0 0 0.75rem;
+  font-size: 0.9em;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+#response th,
+#response td {
+  border: 1px solid var(--border);
+  padding: 0.35em 0.65em;
+  text-align: left;
+}
+
+#response th {
+  background: var(--bg);
+  font-weight: 600;
+}
+
 #response a {
   color: var(--accent);
 }
