@@ -13,6 +13,15 @@ This directory is bind-mounted into the `gateway` container by
 the image -- a new `config_id` is loaded (and then cached) the first time a
 request actually uses it, no restart needed.
 
+**Not related to the standalone prompt-injection guardrail** (see the
+top-level README's "Prompt injection detection" section) -- that layer is
+configured via `config/prompt_injection.yaml` and the
+`/api/admin/prompt-injection` admin API, not as a `config_id` in this
+directory, and runs regardless of `GUARDRAILS_MODE`. `jailbreak_input`
+below is a related but distinct, LLM-based approach to the same general
+problem (an input rail that asks the guardrails LLM itself to judge
+jailbreak framing) -- the two can be used together.
+
 ## Bundled presets
 
 Seven working presets, each using [NeMo Guardrails' built-in rail

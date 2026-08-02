@@ -52,6 +52,70 @@
         </p>
         <div id="guardrails-cards"></div>
       </section>
+
+      <section id="prompt-injection-section" class="admin-section" hidden>
+        <h2>Prompt injection detection</h2>
+        <p class="admin-hint">
+          Fast, local, regex-based pre-filter that scans every
+          <code>/v1/chat/completions</code> request before any LLM call --
+          independent of the guardrails configs above (which can also be
+          used at the same time). See the README's "Prompt injection
+          detection" section.
+        </p>
+
+        <div class="admin-card">
+          <label class="checkbox-field">
+            <input type="checkbox" id="pi-enabled" />
+            <span>Enabled</span>
+          </label>
+
+          <label class="field">
+            <span>Scope</span>
+            <select id="pi-scope">
+              <option value="user_messages_only">User messages only</option>
+              <option value="all_messages">All messages</option>
+            </select>
+          </label>
+
+          <label class="checkbox-field">
+            <input type="checkbox" id="pi-detect-evasions" />
+            <span>Detect evasions (typoglycemia, base64/hex, character-spacing)</span>
+          </label>
+
+          <h3>Categories</h3>
+          <div id="pi-categories"></div>
+
+          <label class="field">
+            <span>Allow-list (one phrase per line)</span>
+            <textarea
+              id="pi-allow-list"
+              rows="3"
+              placeholder="Phrases that should never trigger this guardrail..."
+            ></textarea>
+          </label>
+
+          <button type="button" id="pi-save">Save</button>
+          <span id="pi-status" class="admin-row-status" role="status"></span>
+        </div>
+
+        <div class="admin-card">
+          <h3>Test your patterns</h3>
+          <p class="admin-hint">
+            Runs against the currently saved config above (even while
+            disabled) without affecting any real request.
+          </p>
+          <label class="field">
+            <span>Sample text</span>
+            <textarea
+              id="pi-test-input"
+              rows="3"
+              placeholder="Paste sample text to see how it would be scored..."
+            ></textarea>
+          </label>
+          <button type="button" id="pi-test-run">Test</button>
+          <div id="pi-test-result"></div>
+        </div>
+      </section>
     </main>
 
     <script src="common.js"></script>

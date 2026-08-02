@@ -30,6 +30,17 @@ from app.guardrails.editable_config import (
     read_editable_sections,
     write_editable_sections,
 )
+from app.guardrails.prompt_injection import (
+    InjectionAction,
+    InjectionCategory,
+    InjectionScope,
+    PromptInjectionConfig,
+    get_prompt_injection_config,
+    redact_preview,
+    resolve_overall_action,
+    scan_message,
+    update_prompt_injection_config,
+)
 from app.guardrails.service import CONFIG_ID_PATTERN, GuardrailsService, get_guardrails_service
 from app.schemas.admin import (
     AdminEditableSection,
@@ -39,10 +50,15 @@ from app.schemas.admin import (
     AdminKeyListResponse,
     CreateKeyRequest,
     CreateKeyResponse,
+    PromptInjectionConfigResponse,
+    PromptInjectionTestMatch,
+    PromptInjectionTestRequest,
+    PromptInjectionTestResponse,
     RotateKeyResponse,
     UpdateGuardrailsConfigRequest,
     UpdateKeyGuardrailsConfigsRequest,
     UpdateKeyRequest,
+    UpdatePromptInjectionConfigRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -378,3 +394,112 @@ async def update_guardrails_config(
         for section in manifest_sections
     ]
     return AdminGuardrailsConfigItem(config_id=config_id, editable=True, sections=sections)
+
+
+def _to_prompt_injection_response(config: PromptInjectionConfig) -> PromptInjectionConfigResponse:
+    return PromptInjectionConfigResponse(
+        enabled=config.enabled,
+        scope=config.scope.value,
+        detect_evasions=config.detect_evasions,
+        allow_list=list(config.allow_list),
+        categories={category.value: action.value for category, action in config.categories.items()},
+    )
+
+
+@router.get("/api/admin/prompt-injection", response_model=PromptInjectionConfigResponse)
+async def get_prompt_injection_config_endpoint(
+    config: PromptInjectionConfig = Depends(get_prompt_injection_config),
+    auth: AuthContext = Depends(require_admin),
+) -> PromptInjectionConfigResponse:
+    return _to_prompt_injection_response(config)
+
+
+@router.patch("/api/admin/prompt-injection", response_model=PromptInjectionConfigResponse)
+async def update_prompt_injection_config_endpoint(
+    body: UpdatePromptInjectionConfigRequest,
+    auth: AuthContext = Depends(require_admin),
+) -> PromptInjectionConfigResponse:
+    fields = body.model_dump(exclude_unset=True)
+
+    scope: InjectionScope | None = None
+    if "scope" in fields:
+        try:
+            scope = InjectionScope(fields["scope"])
+        except ValueError:
+            raise OpenAIError(
+                f"Invalid scope `{fields['scope']}`.",
+                status_code=422,
+                error_type="invalid_request_error",
+                param="scope",
+                code="invalid_scope",
+            ) from None
+
+    categories: dict[InjectionCategory, InjectionAction] | None = None
+    if "categories" in fields:
+        categories = {}
+        for raw_category, raw_action in fields["categories"].items():
+            try:
+                category = InjectionCategory(raw_category)
+            except ValueError:
+                raise OpenAIError(
+                    f"Unknown prompt-injection category `{raw_category}`.",
+                    status_code=422,
+                    error_type="invalid_request_error",
+                    param="categories",
+                    code="invalid_category",
+                ) from None
+            try:
+                action = InjectionAction(raw_action)
+            except ValueError:
+                raise OpenAIError(
+                    f"Invalid prompt-injection action `{raw_action}`.",
+                    status_code=422,
+                    error_type="invalid_request_error",
+                    param="categories",
+                    code="invalid_action",
+                ) from None
+            categories[category] = action
+
+    updated = await update_prompt_injection_config(
+        enabled=fields.get("enabled"),
+        scope=scope,
+        detect_evasions=fields.get("detect_evasions"),
+        allow_list=fields.get("allow_list"),
+        categories=categories,
+    )
+
+    logger.info(
+        "admin key_id=%s updated prompt-injection config fields=%s [request_id=%s]",
+        auth.key_id,
+        sorted(fields.keys()),
+        get_request_id(),
+    )
+    return _to_prompt_injection_response(updated)
+
+
+@router.post("/api/admin/prompt-injection/test", response_model=PromptInjectionTestResponse)
+async def test_prompt_injection_config(
+    body: PromptInjectionTestRequest,
+    config: PromptInjectionConfig = Depends(get_prompt_injection_config),
+    auth: AuthContext = Depends(require_admin),
+) -> PromptInjectionTestResponse:
+    # Runs against the current *saved* config regardless of `enabled` --
+    # deliberately works pre-enable so an admin can test a policy before
+    # switching it on, matching OpenRouter's own "test in flag mode first"
+    # guidance. Read-only: never persists anything.
+    matches = scan_message(body.text, config)
+    action = resolve_overall_action(matches, config)
+    redacted_preview = redact_preview(body.text, matches) if action is InjectionAction.REDACT else None
+    return PromptInjectionTestResponse(
+        action=action.value,
+        matches=[
+            PromptInjectionTestMatch(
+                category=m.category.value,
+                pattern_name=m.pattern_name,
+                matched_text=m.matched_text,
+                via=m.via,
+            )
+            for m in matches
+        ],
+        redacted_preview=redacted_preview,
+    )

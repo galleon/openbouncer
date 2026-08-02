@@ -50,6 +50,28 @@ GUARDRAILS_REQUESTS_TOTAL = Counter(
 # can return richer log/output_data -- a bigger change to this class's
 # calling convention than fits this round.
 
+# app.guardrails.prompt_injection -- a separate, standalone pre-filter
+# (independent of GUARDRAILS_MODE, see that module's docstring), unlike
+# GUARDRAILS_REQUESTS_TOTAL above which is specifically about NeMo config_ids.
+PROMPT_INJECTION_SCANNED_TOTAL = Counter(
+    "openbouncer_prompt_injection_scanned_total",
+    "Chat completion requests scanned by the prompt-injection guardrail (only counted while it's enabled).",
+)
+PROMPT_INJECTION_MATCHES_TOTAL = Counter(
+    "openbouncer_prompt_injection_matches_total",
+    "Prompt-injection matches found, by category and by which detection path found them.",
+    ["category", "via"],
+)
+PROMPT_INJECTION_ACTIONS_TOTAL = Counter(
+    "openbouncer_prompt_injection_actions_total",
+    "Prompt-injection guardrail decisions, by the action actually applied to the request.",
+    ["action"],
+)
+# category (9 fixed InjectionCategory values), via (5: direct/typoglycemia/
+# base64/hex/char_spaced), action (3: flag/redact/block -- disabled/no-match
+# requests aren't counted here) are all bounded, code-defined enums, never
+# raw request content -- same cardinality discipline as the comment above.
+
 # Set (not incremented) at scrape time from ModelRegistry's per-model
 # ModelConcurrencyLimiter -- see app/api/routes/metrics.py.
 MODEL_INFLIGHT_REQUESTS = Gauge(

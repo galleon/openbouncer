@@ -8,6 +8,17 @@ const keysSection = document.getElementById("keys-section");
 const keysTableEl = document.getElementById("keys-table");
 const guardrailsSection = document.getElementById("guardrails-section");
 const guardrailsCardsEl = document.getElementById("guardrails-cards");
+const promptInjectionSection = document.getElementById("prompt-injection-section");
+const piEnabledInput = document.getElementById("pi-enabled");
+const piScopeSelect = document.getElementById("pi-scope");
+const piDetectEvasionsInput = document.getElementById("pi-detect-evasions");
+const piCategoriesEl = document.getElementById("pi-categories");
+const piAllowListInput = document.getElementById("pi-allow-list");
+const piSaveButton = document.getElementById("pi-save");
+const piStatusEl = document.getElementById("pi-status");
+const piTestInput = document.getElementById("pi-test-input");
+const piTestRunButton = document.getElementById("pi-test-run");
+const piTestResultEl = document.getElementById("pi-test-result");
 const createKeyForm = document.getElementById("create-key-form");
 const createKeyIdInput = document.getElementById("create-key-id");
 const createKeyModelsInput = document.getElementById("create-key-models");
@@ -342,13 +353,140 @@ function renderGuardrailsCards(configs) {
   }
 }
 
+// "instruction_override" -> "Instruction override".
+function categoryLabel(value) {
+  const words = value.split("_");
+  return words[0].charAt(0).toUpperCase() + words[0].slice(1) + " " + words.slice(1).join(" ");
+}
+
+function renderPromptInjectionCard(config) {
+  piEnabledInput.checked = config.enabled;
+  piScopeSelect.value = config.scope;
+  piDetectEvasionsInput.checked = config.detect_evasions;
+  piAllowListInput.value = config.allow_list.join("\n");
+
+  piCategoriesEl.innerHTML = "";
+  const table = document.createElement("table");
+  table.className = "admin-table";
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th>Category</th><th>Action</th></tr>";
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+
+  const categorySelects = {};
+  for (const [category, action] of Object.entries(config.categories)) {
+    const tr = document.createElement("tr");
+    const nameTd = document.createElement("td");
+    nameTd.textContent = categoryLabel(category);
+    tr.appendChild(nameTd);
+
+    const actionTd = document.createElement("td");
+    const select = document.createElement("select");
+    for (const value of ["disabled", "flag", "redact", "block"]) {
+      select.appendChild(new Option(value, value, false, value === action));
+    }
+    categorySelects[category] = select;
+    actionTd.appendChild(select);
+    tr.appendChild(actionTd);
+
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  piCategoriesEl.appendChild(table);
+
+  piSaveButton.onclick = async () => {
+    const categories = {};
+    for (const [category, select] of Object.entries(categorySelects)) {
+      categories[category] = select.value;
+    }
+    const allowList = piAllowListInput.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    piSaveButton.disabled = true;
+    setStatusText(piStatusEl, "Saving...");
+    const { response, body } = await apiFetch("/api/admin/prompt-injection", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: piEnabledInput.checked,
+        scope: piScopeSelect.value,
+        detect_evasions: piDetectEvasionsInput.checked,
+        allow_list: allowList,
+        categories,
+      }),
+    });
+    piSaveButton.disabled = false;
+    if (response.ok) {
+      setStatusText(piStatusEl, "Saved.");
+      renderPromptInjectionCard(body);
+    } else {
+      setStatusText(piStatusEl, formatError(body), true);
+    }
+  };
+}
+
+function renderPromptInjectionTestResult(result) {
+  piTestResultEl.innerHTML = "";
+
+  const actionEl = document.createElement("p");
+  actionEl.innerHTML = `Action: <strong>${escapeHtml(result.action)}</strong>`;
+  piTestResultEl.appendChild(actionEl);
+
+  if (result.matches.length === 0) {
+    const none = document.createElement("p");
+    none.className = "admin-hint";
+    none.textContent = "No matches.";
+    piTestResultEl.appendChild(none);
+  } else {
+    const list = document.createElement("ul");
+    for (const match of result.matches) {
+      const li = document.createElement("li");
+      li.textContent = `${categoryLabel(match.category)} (${match.pattern_name}, via ${match.via}): "${match.matched_text}"`;
+      list.appendChild(li);
+    }
+    piTestResultEl.appendChild(list);
+  }
+
+  if (result.redacted_preview !== null && result.redacted_preview !== undefined) {
+    const previewLabel = document.createElement("p");
+    previewLabel.textContent = "Redacted preview:";
+    const preview = document.createElement("pre");
+    preview.textContent = result.redacted_preview;
+    piTestResultEl.appendChild(previewLabel);
+    piTestResultEl.appendChild(preview);
+  }
+}
+
+piTestRunButton.addEventListener("click", async () => {
+  const text = piTestInput.value.trim();
+  if (!text) {
+    return;
+  }
+  piTestRunButton.disabled = true;
+  piTestResultEl.innerHTML = "";
+  const { response, body } = await apiFetch("/api/admin/prompt-injection/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  piTestRunButton.disabled = false;
+  if (response.ok) {
+    renderPromptInjectionTestResult(body);
+  } else {
+    piTestResultEl.textContent = formatError(body);
+  }
+});
+
 async function loadAdminPanel() {
   const { response: keysResp, body: keysBody } = await apiFetch("/api/admin/keys");
   const { response: configsResp, body: configsBody } = await apiFetch(
     "/api/admin/guardrails/configs",
   );
+  const { response: piResp, body: piBody } = await apiFetch("/api/admin/prompt-injection");
 
-  if (!keysResp.ok || !configsResp.ok) {
+  if (!keysResp.ok || !configsResp.ok || !piResp.ok) {
     setStatusText(adminStatusEl, "Failed to load admin data.", true);
     return;
   }
@@ -357,16 +495,20 @@ async function loadAdminPanel() {
 
   renderKeysTable(keysBody.keys);
   renderGuardrailsCards(configsBody.configs);
+  renderPromptInjectionCard(piBody);
 
   keysSection.hidden = false;
   guardrailsSection.hidden = false;
+  promptInjectionSection.hidden = false;
 }
 
 async function refreshAccess() {
   keysSection.hidden = true;
   guardrailsSection.hidden = true;
+  promptInjectionSection.hidden = true;
   keysTableEl.innerHTML = "";
   guardrailsCardsEl.innerHTML = "";
+  piTestResultEl.innerHTML = "";
   createKeyResultEl.innerHTML = "";
   setStatusText(createKeyStatusEl, "");
 

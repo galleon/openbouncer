@@ -79,3 +79,48 @@ class UpdateGuardrailsConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sections: dict[str, list[str]]
+
+
+class PromptInjectionConfigResponse(BaseModel):
+    enabled: bool
+    scope: str
+    detect_evasions: bool
+    allow_list: list[str]
+    # InjectionCategory value -> InjectionAction value, always all 9 keys.
+    categories: dict[str, str]
+
+
+class UpdatePromptInjectionConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # All fields default to "unset" (None) so the route can build a
+    # partial-update dict via model_dump(exclude_unset=True), same idiom as
+    # UpdateKeyRequest -- an omitted field is left alone. `categories` is a
+    # *partial* map (only the keys being changed); see
+    # app.guardrails.prompt_injection.update_prompt_injection_config for
+    # how it's merged against the existing categories.
+    enabled: bool | None = None
+    scope: str | None = None
+    detect_evasions: bool | None = None
+    allow_list: list[str] | None = None
+    categories: dict[str, str] | None = None
+
+
+class PromptInjectionTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class PromptInjectionTestMatch(BaseModel):
+    category: str
+    pattern_name: str
+    matched_text: str
+    via: str
+
+
+class PromptInjectionTestResponse(BaseModel):
+    action: str
+    matches: list[PromptInjectionTestMatch]
+    # Only populated when `action` is "redact".
+    redacted_preview: str | None

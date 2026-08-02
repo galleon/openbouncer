@@ -1,0 +1,51 @@
+# Fast, local, regex-based prompt-injection detection -- a standalone
+# pre-filter independent of GUARDRAILS_MODE, see the "Prompt injection
+# detection" section of the top-level README. Unlike config/api_keys.yaml,
+# this file holds no secrets, so it's committed directly (like
+# config/models.yaml) rather than split into a gitignored real file plus a
+# tracked .example.yaml template.
+#
+# Editable at runtime via the admin API (GET/PATCH /api/admin/prompt-injection)
+# or the admin UI's "Prompt Injection" card -- changes made that way are
+# written back to this file and take effect on the very next request, no
+# restart needed. Hand-editing this file directly also works, but requires
+# a restart to pick up (no filesystem watch). Note: an admin write (via the
+# API/UI) round-trips through yaml.safe_dump and will strip these comments,
+# same as every other admin-editable config file in this codebase.
+#
+# Shipped with enabled: false -- same "powerful new feature defaults off"
+# posture as GUARDRAILS_MODE=disabled elsewhere in this codebase, so
+# pulling in this feature doesn't silently start blocking/redacting
+# traffic on any existing deployment. The category actions below are a
+# reasonable starting policy for once it's turned on; test in `flag` mode
+# against real traffic first (see the README) before switching to `block`.
+enabled: false
+
+# all_messages | user_messages_only -- whether the scan also covers system/
+# assistant/tool messages in the conversation, or only what the caller
+# supplied as the user's own message.
+scope: user_messages_only
+
+# Master switch for the typoglycemia / base64+hex-decode / character-spaced
+# evasion countermeasures. Direct pattern matching always runs regardless.
+detect_evasions: true
+
+# Phrases that should never trigger this guardrail, e.g. a legitimate
+# product name that happens to match a pattern (false-positive
+# suppression). Case-insensitive substring match against each match's own
+# matched text.
+allow_list: []
+
+# disabled | flag | redact | block, per category. A category not listed
+# here defaults to "flag" (log-only) -- an admin has to opt in to
+# block/redact explicitly.
+categories:
+  instruction_override: block
+  mode_activation: block
+  system_override: block
+  prompt_extraction: redact
+  role_manipulation: flag
+  jailbreak_dan: block
+  safety_bypass: block
+  tag_injection: redact
+  control_token_injection: redact

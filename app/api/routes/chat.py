@@ -13,9 +13,22 @@ from app.auth.dependency import (
 )
 from app.auth.usage import UsageTracker, get_usage_tracker
 from app.core.errors import OpenAIError
-from app.core.metrics import CHAT_COMPLETION_DURATION_SECONDS, CHAT_COMPLETIONS_TOTAL
+from app.core.metrics import (
+    CHAT_COMPLETION_DURATION_SECONDS,
+    CHAT_COMPLETIONS_TOTAL,
+    PROMPT_INJECTION_ACTIONS_TOTAL,
+    PROMPT_INJECTION_MATCHES_TOTAL,
+    PROMPT_INJECTION_SCANNED_TOTAL,
+)
 from app.core.registry import ModelConcurrencyLimiter, ModelRegistry, get_model_registry, resolve_api_key
 from app.core.request_context import get_request_id
+from app.guardrails.prompt_injection import (
+    InjectionAction,
+    PromptInjectionConfig,
+    apply_action,
+    get_prompt_injection_config,
+    scan_request,
+)
 from app.guardrails.service import GuardrailsService, get_guardrails_service
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from app.upstream.client import UpstreamClient, get_upstream_client
@@ -87,6 +100,7 @@ async def create_chat_completion(
     auth: AuthContext = Depends(require_api_key),
     usage_tracker: UsageTracker = Depends(get_usage_tracker),
     guardrails: GuardrailsService = Depends(get_guardrails_service),
+    pi_config: PromptInjectionConfig = Depends(get_prompt_injection_config),
 ) -> ChatCompletionResponse | StreamingResponse:
     if request.model not in registry:
         # No CHAT_COMPLETIONS_TOTAL recorded here -- request.model is
@@ -119,6 +133,41 @@ async def create_chat_completion(
                 param="model",
                 code="model_does_not_support_chat",
             )
+        if pi_config.enabled:
+            PROMPT_INJECTION_SCANNED_TOTAL.inc()
+            pi_results = scan_request(request, pi_config)
+            if pi_results:
+                request, pi_action, pi_matches = apply_action(request, pi_results)
+                PROMPT_INJECTION_ACTIONS_TOTAL.labels(action=pi_action.value).inc()
+                for match in pi_matches:
+                    PROMPT_INJECTION_MATCHES_TOTAL.labels(category=match.category.value, via=match.via).inc()
+                if pi_action is InjectionAction.BLOCK:
+                    logger.warning(
+                        "prompt injection blocked key_id=%s model=%s categories=%s request_id=%s",
+                        auth.key_id,
+                        request.model,
+                        sorted({m.category.value for m in pi_matches}),
+                        get_request_id(),
+                    )
+                    raise OpenAIError(
+                        "Your message was blocked by the prompt-injection guardrail.",
+                        status_code=403,
+                        error_type="permission_error",
+                        code="prompt_injection_detected",
+                    )
+                if pi_action is InjectionAction.FLAG:
+                    logger.info(
+                        "prompt injection flagged key_id=%s model=%s categories=%s request_id=%s",
+                        auth.key_id,
+                        request.model,
+                        sorted({m.category.value for m in pi_matches}),
+                        get_request_id(),
+                    )
+                # REDACT: `request` above is already the rewritten copy from
+                # apply_action() -- nothing further to do, it flows into the
+                # branches below (NeMo guardrails, if enabled, or direct
+                # upstream) exactly as if it had arrived pre-sanitized.
+
         requested_config_id = _requested_config_id(request)
         if requested_config_id is not None:
             ensure_guardrails_config_allowed(auth, requested_config_id)
