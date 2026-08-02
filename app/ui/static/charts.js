@@ -72,13 +72,15 @@ function pickTickIndices(count, maxTicks) {
   return Array.from(indices);
 }
 
-// bucketSeconds (the gap between consecutive buckets) decides the
-// granularity actually worth showing -- minutes/hours within a day,
-// otherwise just the date, matching whatever step the backend chose for
-// the selected range (app/api/routes/activity.py's _RANGE_CONFIG).
-function formatAxisTimestamp(unixSeconds, bucketSeconds) {
+// totalSpanSeconds (first bucket to last bucket actually plotted) decides
+// the granularity worth showing -- e.g. a 30-day range still buckets at a
+// sub-day step (app/api/routes/activity.py's _RANGE_CONFIG), so labeling
+// by bucket width alone would print the same handful of times-of-day over
+// and over with no date, which is unreadable across many days. Once the
+// plotted range crosses a day, show the date instead.
+function formatAxisTimestamp(unixSeconds, totalSpanSeconds) {
   const date = new Date(unixSeconds * 1000);
-  if (bucketSeconds < 24 * 3600) {
+  if (totalSpanSeconds < 24 * 3600) {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
@@ -118,6 +120,8 @@ function renderTimeSeries(container, data) {
     new Set(nonEmptySeries.flatMap((s) => s.points.map((p) => p.t))),
   ).sort((a, b) => a - b);
   const bucketSeconds = timestamps.length > 1 ? timestamps[1] - timestamps[0] : 3600;
+  const totalSpanSeconds =
+    timestamps.length > 1 ? timestamps[timestamps.length - 1] - timestamps[0] : bucketSeconds;
 
   const aligned = nonEmptySeries.map((s) => {
     const byTime = new Map(s.points.map((p) => [p.t, p.v]));
@@ -200,7 +204,7 @@ function renderTimeSeries(container, data) {
       y: padding.top + plotHeight + 16,
       class: "timeseries-axis-label timeseries-axis-label-x",
     });
-    label.textContent = formatAxisTimestamp(timestamps[i], bucketSeconds);
+    label.textContent = formatAxisTimestamp(timestamps[i], totalSpanSeconds);
     svg.appendChild(label);
   }
 

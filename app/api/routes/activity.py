@@ -20,15 +20,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# step: point spacing for the time-series chart, kept coarse enough that a
-# browser-rendered SVG chart doesn't choke on point count. rate_window: the
-# rate()/increase() lookback for the *_by_model series -- roughly matched
-# to step so the line stays smooth without over-averaging short ranges.
+# step: bucket width for the time-series chart, kept coarse enough that a
+# browser-rendered SVG chart doesn't choke on point count. The by-model
+# series uses increase() over a window equal to step, so each bar is an
+# actual request count for that bucket (not a rate) -- matches the
+# stacked-bar chart's semantics and keeps Y-axis values readable instead of
+# vanishingly small per-second rates.
 _RANGE_CONFIG = {
-    "1h": {"seconds": 3600, "step": "1m", "rate_window": "5m"},
-    "24h": {"seconds": 86400, "step": "15m", "rate_window": "15m"},
-    "7d": {"seconds": 7 * 86400, "step": "2h", "rate_window": "1h"},
-    "30d": {"seconds": 30 * 86400, "step": "6h", "rate_window": "6h"},
+    "1h": {"seconds": 3600, "step": "1m"},
+    "24h": {"seconds": 86400, "step": "15m"},
+    "7d": {"seconds": 7 * 86400, "step": "2h"},
+    "30d": {"seconds": 30 * 86400, "step": "6h"},
 }
 
 
@@ -90,7 +92,7 @@ async def activity_overview(
                 f"sum(increase(openbouncer_chat_completion_duration_seconds_count[{window}]))"
             ),
             prometheus.query_range(
-                f"sum(rate(openbouncer_chat_completions_total[{config['rate_window']}])) by (model)",
+                f"sum(increase(openbouncer_chat_completions_total[{config['step']}])) by (model)",
                 start=now - config["seconds"],
                 end=now,
                 step=config["step"],
