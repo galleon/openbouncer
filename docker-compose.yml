@@ -44,6 +44,14 @@ services:
       # Only used if the `redis` profile is enabled below; leave unset to
       # use OpenBouncer's built-in in-memory rate limiter instead.
       REDIS_URL: ${REDIS_URL:-}
+
+      # Backs the admin UI's Activity dashboard (GET /api/admin/activity/overview).
+      # Points at the `prometheus` service below, which is behind the
+      # `observability` profile and disabled by default -- set unconditionally
+      # here regardless of whether that profile is running; the endpoint
+      # degrades to a clean 503 if Prometheus isn't actually reachable,
+      # rather than needing a hard dependency between the two services.
+      PROMETHEUS_URL: http://prometheus:9090
     volumes:
       # Read-write as of the admin UI (app/api/routes/admin.py): admin
       # edits (per-key allowed_guardrails_configs, guardrails config bullet
