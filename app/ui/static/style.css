@@ -258,6 +258,13 @@ button:disabled {
   margin: 0.15rem 0;
 }
 
+/* markdown-it wraps "loose" list items (blank line between them in the
+   source) in <p>; keep those as compact as tight-list items instead of
+   the full paragraph margin. */
+#response li > p {
+  margin: 0.15rem 0;
+}
+
 #response blockquote {
   margin: 0 0 0.75rem;
   padding: 0.25rem 0.75rem;

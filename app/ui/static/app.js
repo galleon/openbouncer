@@ -46,225 +46,80 @@ function renderMath(expr, displayMode) {
   }
 }
 
-// Extracts $$...$$ and $...$ math spans into placeholders (so the
-// bold/italic/link regexes below can't misread a stray */_ inside a
-// formula), rendering each via KaTeX up front. Returns the
-// placeholder-substituted text and the list of rendered formula HTML to
-// splice back in afterward.
-function extractMath(text) {
-  const formulas = [];
-  const withBlocks = text.replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
-    formulas.push(renderMath(expr, true));
-    return `OB_FORMULA_${formulas.length - 1}_END`;
-  });
-  const withInline = withBlocks.replace(/\$([^\$\n]+?)\$/g, (whole, expr) => {
-    // Bare "$5"/"$10"-style currency mentions are digits right after the
-    // $ -- leave those as literal text so prose discussing prices doesn't
-    // get misread as a formula spanning "5 and $10" (an ordinary sentence
-    // has no closing $ to properly pair with, so the regex above would
-    // otherwise pair mismatched dollar signs across unrelated prices).
-    // Anything else -- a LaTeX command/operator, or a single bare
-    // variable like "$k$" -- is treated as math.
-    const trimmed = expr.trim();
-    const looksLikeCurrency = /^[\d.,\s]+$/.test(trimmed);
-    const looksLikeMath = /\\[a-zA-Z]|[\^_=]/.test(expr) || /^[a-zA-Z][a-zA-Z0-9']*$/.test(trimmed);
-    if (looksLikeCurrency || !looksLikeMath) {
-      return whole;
-    }
-    formulas.push(renderMath(expr, false));
-    return `OB_FORMULA_${formulas.length - 1}_END`;
-  });
-  return { text: withInline, formulas };
+// True for $...$ content that's just a bare "$5"/"$10"-style currency
+// mention -- left as literal text so prose discussing prices doesn't get
+// misread as a formula. Anything else (a LaTeX command/operator, or a
+// single bare variable like "k") is treated as math.
+function looksLikeMath(expr) {
+  const trimmed = expr.trim();
+  const looksLikeCurrency = /^[\d.,\s]+$/.test(trimmed);
+  const hasMathMarker = /\\[a-zA-Z]|[\^_=]/.test(expr) || /^[a-zA-Z][a-zA-Z0-9']*$/.test(trimmed);
+  return !looksLikeCurrency && hasMathMarker;
 }
 
-// Minimal, self-contained Markdown -> HTML renderer for the response box.
-// Every line is HTML-escaped (via common.js's escapeHtml) before any
-// markdown syntax is turned into tags, and link hrefs are restricted to
-// http(s)/mailto, so model output (which is untrusted -- e.g. a
-// prompt-injected response) can't inject live markup or script. Math is
-// extracted (and its LaTeX rendered to safe HTML via KaTeX) before
-// escaping runs on the rest of the text -- see extractMath above.
-function renderInlineMarkdown(text) {
-  const { text: withPlaceholders, formulas } = extractMath(text);
-  let out = escapeHtml(withPlaceholders);
-  out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_, label, url) => {
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  });
-  out = out.replace(/OB_FORMULA_(\d+)_END/g, (_, idx) => formulas[Number(idx)]);
-  return out;
-}
+// A markdown-it inline rule (the same technique real math plugins like
+// markdown-it-texmath use), not a post-processing regex pass over
+// rendered text -- inserted *before* emphasis, so it claims a "$...$"
+// span atomically, character by character, before "*"/"_" inside the
+// formula (e.g. a literal multiplication "$a * b$") can be misread as
+// emphasis markers by markdown-it's own parser. Because it runs after
+// backticks/fences are already tokenized as their own types, a literal
+// "$" inside a code example is never visited here either.
+function mathInlineRule(state, silent) {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0x24 /* $ */) return false;
 
-// Splits a GFM table row on unescaped "|", dropping the optional leading/
-// trailing pipe and unescaping "\|" within cells.
-function splitTableRow(line) {
-  let trimmed = line.trim();
-  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
-  if (trimmed.endsWith("|") && !trimmed.endsWith("\\|")) trimmed = trimmed.slice(0, -1);
-  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
-}
+  const isBlock = state.src.charCodeAt(start + 1) === 0x24;
+  const openLen = isBlock ? 2 : 1;
+  const searchFrom = start + openLen;
+  const closeIndex = isBlock
+    ? state.src.indexOf("$$", searchFrom)
+    : (() => {
+        for (let i = searchFrom; i < state.posMax; i++) {
+          const code = state.src.charCodeAt(i);
+          if (code === 0x24) return i;
+          if (code === 0x0a) return -1; // no bare newlines inside inline math
+        }
+        return -1;
+      })();
+  if (closeIndex === -1 || closeIndex === searchFrom) return false;
 
-// A separator row is only ":"/"-" cells (e.g. "| :--- | ---: | :---: |") --
-// this is what actually identifies a table (vs. two lines that merely
-// happen to contain "|"), so it's checked before treating anything as one.
-function isTableSeparatorRow(line) {
-  if (!line.includes("-")) return false;
-  const cells = splitTableRow(line);
-  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
-}
+  const expr = state.src.slice(searchFrom, closeIndex);
+  if (!isBlock && !looksLikeMath(expr)) return false;
 
-function tableColumnAlignment(sepCell) {
-  const left = sepCell.startsWith(":");
-  const right = sepCell.endsWith(":");
-  if (left && right) return "center";
-  if (right) return "right";
-  if (left) return "left";
-  return null;
-}
-
-function renderTableRow(cells, alignments, tag) {
-  const tds = cells
-    .map((cell, i) => {
-      const align = alignments[i];
-      const style = align ? ` style="text-align:${align}"` : "";
-      return `<${tag}${style}>${renderInlineMarkdown(cell)}</${tag}>`;
-    })
-    .join("");
-  return `<tr>${tds}</tr>`;
-}
-
-function renderMarkdown(source) {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  let html = "";
-  let listType = null;
-  let i = 0;
-
-  function closeList() {
-    if (listType) {
-      html += listType === "ul" ? "</ul>" : "</ol>";
-      listType = null;
-    }
+  if (!silent) {
+    const token = state.push("html_inline", "", 0);
+    token.content = renderMath(expr, isBlock);
   }
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    const fenceMatch = line.match(/^```(\w*)\s*$/);
-    if (fenceMatch) {
-      closeList();
-      i++;
-      const codeLines = [];
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++;
-      html += `<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
-      continue;
-    }
-
-    if (line.trim() === "") {
-      closeList();
-      i++;
-      continue;
-    }
-
-    const headerMatch = line.match(/^(#{1,6})\s+(.*)$/);
-    if (headerMatch) {
-      closeList();
-      const level = headerMatch[1].length;
-      html += `<h${level}>${renderInlineMarkdown(headerMatch[2])}</h${level}>`;
-      i++;
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
-      closeList();
-      html += "<hr>";
-      i++;
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      closeList();
-      const quoteLines = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) {
-        quoteLines.push(lines[i].replace(/^>\s?/, ""));
-        i++;
-      }
-      html += `<blockquote>${renderInlineMarkdown(quoteLines.join(" "))}</blockquote>`;
-      continue;
-    }
-
-    if (line.includes("|") && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1])) {
-      closeList();
-      const headerCells = splitTableRow(line);
-      const alignments = splitTableRow(lines[i + 1]).map(tableColumnAlignment);
-      i += 2;
-      let bodyRows = "";
-      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
-        bodyRows += renderTableRow(splitTableRow(lines[i]), alignments, "td");
-        i++;
-      }
-      html += `<table><thead>${renderTableRow(headerCells, alignments, "th")}</thead><tbody>${bodyRows}</tbody></table>`;
-      continue;
-    }
-
-    const ulMatch = line.match(/^[-*]\s+(.*)$/);
-    if (ulMatch) {
-      if (listType !== "ul") {
-        closeList();
-        html += "<ul>";
-        listType = "ul";
-      }
-      html += `<li>${renderInlineMarkdown(ulMatch[1])}</li>`;
-      i++;
-      continue;
-    }
-
-    const olMatch = line.match(/^\d+\.\s+(.*)$/);
-    if (olMatch) {
-      if (listType !== "ol") {
-        closeList();
-        html += "<ol>";
-        listType = "ol";
-      }
-      html += `<li>${renderInlineMarkdown(olMatch[1])}</li>`;
-      i++;
-      continue;
-    }
-
-    closeList();
-    const paraLines = [line];
-    i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !/^```/.test(lines[i]) &&
-      !/^#{1,6}\s/.test(lines[i]) &&
-      !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim()) &&
-      !/^[-*]\s+/.test(lines[i]) &&
-      !/^\d+\.\s+/.test(lines[i]) &&
-      !/^>\s?/.test(lines[i]) &&
-      !(lines[i].includes("|") && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1]))
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    html += `<p>${renderInlineMarkdown(paraLines.join("\n")).replace(/\n/g, "<br>")}</p>`;
-  }
-  closeList();
-  return html;
+  state.pos = closeIndex + openLen;
+  return true;
 }
+
+// Markdown -> HTML for the response box, via vendored markdown-it (self-
+// hosted, see vendor/markdown-it-15.0.0/VENDORED.md). Default options keep
+// `html: false` -- raw HTML in model output (e.g. a prompt-injected
+// response) is escaped, not rendered -- and markdown-it's built-in link
+// validator already rejects javascript:/data: hrefs. Tables and
+// strikethrough are supported by markdown-it's core, no plugins needed.
+const md = markdownit({ html: false });
+md.inline.ruler.before("emphasis", "openbouncer_math", mathInlineRule);
+
+// Every rendered link opens in a new tab, matching the tester's previous
+// link behavior.
+const defaultLinkOpen =
+  md.renderer.rules.link_open ||
+  ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet("target", "_blank");
+  tokens[idx].attrSet("rel", "noopener noreferrer");
+  return defaultLinkOpen(tokens, idx, options, env, self);
+};
 
 function setResponse(text, isError = false) {
   if (isError) {
     responseEl.textContent = text;
   } else {
-    responseEl.innerHTML = renderMarkdown(text);
+    responseEl.innerHTML = md.render(text);
   }
   responseEl.classList.toggle("error", isError);
 }
