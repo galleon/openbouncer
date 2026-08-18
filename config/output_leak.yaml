@@ -1,0 +1,45 @@
+# Fast, local, regex-based scanning of *model output* for sensitive
+# information -- a standalone post-filter, independent of GUARDRAILS_MODE,
+# see the "Output-leak guardrail" section of the top-level README. Like
+# config/prompt_injection.yaml, this file holds no secrets, so it's
+# committed directly rather than split into a gitignored real file plus a
+# tracked .example.yaml template.
+#
+# Editable at runtime via the admin API (GET/PATCH /api/admin/output-leak)
+# or the admin UI's "Output Leak" card -- changes made that way are written
+# back to this file and take effect on the very next request, no restart
+# needed. Hand-editing this file directly also works, but requires a
+# restart to pick up (no filesystem watch). Note: an admin write (via the
+# API/UI) round-trips through yaml.safe_dump and will strip these comments.
+#
+# Shipped with enabled: false -- same "powerful new feature defaults off"
+# posture as config/prompt_injection.yaml, so pulling in this feature
+# doesn't silently start redacting/blocking responses on any existing
+# deployment. The category actions below are a reasonable starting policy
+# for once it's turned on -- test in `flag` mode against real traffic
+# first (see the README) before switching a category to `block`, which
+# discards an already-generated (and already-billed) response.
+enabled: false
+
+# Phrases that should never trigger this guardrail, e.g. a support
+# team's own published contact email (false-positive suppression).
+# Case-insensitive substring match against each match's own matched text.
+allow_list: []
+
+# disabled | flag | redact | block, per category. A category not listed
+# here defaults to "flag" (log-only) -- an admin has to opt in to
+# block/redact explicitly.
+categories:
+  email: flag
+  phone: flag
+  ip_address: flag
+  ssn: redact
+  credit_card: redact
+  secret_token: redact
+
+# Admin-defined custom regex patterns, in addition to the fixed categories
+# above -- e.g. an internal project codename or a proprietary identifier
+# format that shouldn't appear in a response. Each entry gets its own
+# action and redacts (if action: redact) to "[NAME]" (uppercased). See the
+# README for how to add these via the admin API/UI.
+custom_patterns: []

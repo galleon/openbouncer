@@ -16,6 +16,44 @@ def guardrails_catalog_override():
     app.dependency_overrides.pop(get_guardrails_catalog_service, None)
 
 
+class TestWhoAmI:
+    @pytest.mark.asyncio
+    async def test_requires_auth(self, unauthenticated_client):
+        response = await unauthenticated_client.get("/api/ui/whoami")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_plain_key_has_no_admin_scopes(self, client):
+        response = await client.get("/api/ui/whoami")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_admin"] is False
+        assert body["admin_scopes"] == []
+
+    @pytest.mark.asyncio
+    async def test_scoped_key_reports_its_own_scopes(self, observer_client):
+        response = await observer_client.get("/api/ui/whoami")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_admin"] is False
+        assert body["admin_scopes"] == ["activity:read", "metrics:read"]
+
+    @pytest.mark.asyncio
+    async def test_admin_key_reports_every_scope(self, admin_client):
+        response = await admin_client.get("/api/ui/whoami")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_admin"] is True
+        assert body["admin_scopes"] == [
+            "activity:read",
+            "guardrails:write",
+            "keys:write",
+            "metrics:read",
+            "output_leak:write",
+            "prompt_injection:write",
+        ]
+
+
 class TestUIModelsEndpoint:
     @pytest.mark.asyncio
     async def test_requires_auth(self, unauthenticated_client):

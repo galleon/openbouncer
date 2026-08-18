@@ -72,6 +72,30 @@ PROMPT_INJECTION_ACTIONS_TOTAL = Counter(
 # requests aren't counted here) are all bounded, code-defined enums, never
 # raw request content -- same cardinality discipline as the comment above.
 
+# app.guardrails.output_leak -- the response-side sibling of
+# PROMPT_INJECTION_*_TOTAL above: a separate, standalone post-filter
+# (independent of GUARDRAILS_MODE) that scans model *output* instead of the
+# request.
+OUTPUT_LEAK_SCANNED_TOTAL = Counter(
+    "openbouncer_output_leak_scanned_total",
+    "Chat completion responses scanned by the output sensitive-information guardrail (only counted while it's enabled).",
+)
+OUTPUT_LEAK_MATCHES_TOTAL = Counter(
+    "openbouncer_output_leak_matches_total",
+    "Sensitive-information matches found in model output, by category. Admin-defined custom_patterns matches are "
+    "grouped under category=\"custom\" -- their name is unbounded, admin-supplied text (see "
+    "app.guardrails.output_leak.OutputLeakCategory.CUSTOM), so it's logged, not used as a metric label.",
+    ["category"],
+)
+OUTPUT_LEAK_ACTIONS_TOTAL = Counter(
+    "openbouncer_output_leak_actions_total",
+    "Output-leak guardrail decisions, by the action actually applied to the response.",
+    ["action"],
+)
+# category (6 fixed OutputLeakCategory values, "custom" included), action (3:
+# flag/redact/block) are bounded, code-defined enums -- same cardinality
+# discipline as PROMPT_INJECTION_*_TOTAL above.
+
 # Set (not incremented) at scrape time from ModelRegistry's per-model
 # ModelConcurrencyLimiter -- see app/api/routes/metrics.py.
 MODEL_INFLIGHT_REQUESTS = Gauge(

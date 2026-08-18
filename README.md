@@ -91,8 +91,9 @@ Config is passed via environment variables (see `docker-compose.yml`):
 | `UPSTREAM_NVIDIA_API_KEY` | Upstream API key for the bundled NVIDIA-hosted models (matches `config/models.yaml`'s `api_key_env`). |
 | `LOG_LEVEL` | Root logging level, e.g. `DEBUG` / `INFO` / `WARNING` (default `INFO`). |
 
-Optional Redis-backed (instead of in-memory) rate limiting, for running
-multiple gateway replicas against one shared budget:
+Optional Redis-backed (instead of in-memory) rate limiting *and* usage
+accounting, for running multiple gateway replicas against one shared
+budget and one shared set of per-key usage totals:
 
 ```bash
 echo "REDIS_URL=redis://redis:6379/0" >> .env
@@ -100,7 +101,9 @@ docker compose --profile redis up --build
 ```
 
 Without the `redis` profile and `REDIS_URL`, the gateway just uses its
-built-in in-memory limiter -- no code or config changes needed either way.
+built-in in-memory limiter and tracker -- no code or config changes needed
+either way (both `app/auth/rate_limiter.py` and `app/auth/usage.py` switch
+on the same `REDIS_URL`).
 
 ## Authentication
 
@@ -135,6 +138,7 @@ keys:
     allowed_models: [nvidia/qwen3.6-nvfp4]   # must be a subset of config/models.yaml's ids
     requests_per_minute: 60              # optional, defaults to 60
     is_admin: false                      # optional, defaults to false -- see Admin API below
+    admin_scopes: [metrics:read]         # optional, defaults to [] -- see Scoped admin access below
     allowed_guardrails_configs: [content_safety]  # optional, defaults to unrestricted -- see Admin API below
 ```
 
@@ -147,15 +151,52 @@ in-memory and per-process; set `REDIS_URL` (e.g. `redis://redis:6379/0`) to
 back it with Redis instead, so multiple gateway replicas share one budget
 per key (see [Running with Docker](#running-with-docker)).
 
+With `REDIS_URL` set, `RedisRateLimiter.check` -- called on every
+authenticated request via `require_api_key` -- **fails open** if Redis is
+unreachable or errors: the request is allowed through and a warning is
+logged, rather than every request failing with a 500 for the duration of a
+Redis outage. Rate limiting is a best-effort abuse guard here, not a
+security boundary, so trading strict enforcement for availability during
+an outage is a deliberate choice.
+
 ### Usage accounting
 
-`app/auth/usage.py` keeps a basic in-memory per-key counter (`requests`,
-`prompt_tokens`, `completion_tokens`, `total_tokens`), fed from whatever
-`usage` object a response ends up with -- real upstream usage when available,
-or the stub-computed counts otherwise. It's in-process, not persisted, and
-not billing-grade; streaming responses currently only increment `requests`
-since we don't yet capture a final usage total for them (that needs OpenAI's
-`stream_options.include_usage`, not implemented yet).
+`app/auth/usage.py` keeps a per-key counter (`requests`, `prompt_tokens`,
+`completion_tokens`, `total_tokens`) -- in-memory and per-process by
+default, or backed by Redis (same `REDIS_URL` as [rate
+limiting](#rate-limiting)) so multiple replicas share one running total per
+key instead of each keeping its own. Either way it's still not
+billing-grade metering: it doesn't persist a historical/queryable ledger,
+just a running total. Same fail-open posture as rate limiting: if Redis is
+unreachable, `RedisUsageTracker.record` logs a warning and drops the
+write rather than raising -- a request that already succeeded (the
+upstream model already answered) must not turn into a 500 just because
+the accounting write failed at the very end. `.get`/`.all` degrade the
+same way, returning zeroed/partial stats instead of raising.
+
+Where the numbers come from:
+
+- **Non-streaming, no guardrails**: exact usage from the upstream
+  response.
+- **Non-streaming, guardrails (`nemo_library`)**: a word-count estimate
+  (`len(text.split())`), since nemoguardrails doesn't expose the
+  underlying LLM's real token counts through `generate_async()`.
+- **Streaming, no guardrails**: `UpstreamClient.stream_chat_completion`
+  always sets `stream_options: {"include_usage": true}` on the *upstream*
+  request, regardless of whether the caller of this gateway asked for
+  one, so it can capture upstream's real final usage chunk for accounting
+  even when the calling client didn't opt in. That extra chunk is only
+  relayed to the caller if their own request set
+  `stream_options.include_usage: true` (matching what a client library
+  actually expects to receive); otherwise it's captured and swallowed.
+  Not every upstream honors `stream_options` (e.g. Ollama's OpenAI-compat
+  layer doesn't) -- token counts just stay `0` in that case, same as
+  before this existed, with `requests` still incremented.
+- **Streaming, guardrails (`nemo_library`)**: the same word-count estimate
+  as the non-streaming guardrails case, computed once the stream
+  completes (`NemoLibraryGuardrailsService._stream_response`) -- an
+  interrupted/errored stream records no usage at all rather than a
+  fabricated success-shaped estimate.
 
 ### Request logging
 
@@ -174,6 +215,7 @@ limiting, and usage accounting.
 | Model not in the key's `allowed_models` | 403 | `permission_error` | `model_not_allowed` |
 | `guardrails.config_id` not in the key's `allowed_guardrails_configs` | 403 | `permission_error` | `guardrails_config_not_allowed` |
 | Blocked by the [prompt injection detection](#prompt-injection-detection) guardrail | 403 | `permission_error` | `prompt_injection_detected` |
+| Blocked by the [output-leak guardrail](#output-leak-guardrail) (non-streaming only -- see that section for streaming) | 403 | `permission_error` | `output_leak_detected` |
 | `/api/admin/*` (or `/metrics`) called by a non-admin key | 403 | `permission_error` | `admin_required` |
 
 ## Admin API
@@ -200,6 +242,34 @@ This check only applies when a request *explicitly* sets
 `guardrails.config_id` -- a request that omits it and relies on the
 server-side `GUARDRAILS_NEMO_DEFAULT_CONFIG_ID` default isn't affected,
 since that default is an operator choice, not something the client picked.
+
+### Scoped admin access
+
+`is_admin: true` grants every admin capability. For a key that should only
+have *some* of them -- e.g. a Prometheus scrape credential that only needs
+to read `/metrics`, or an SRE who should see the Activity dashboard but
+must not be able to mint/delete keys or rewrite guardrails policy -- set
+`admin_scopes` on the key entry instead, to a subset of:
+
+| Scope | Grants |
+| --- | --- |
+| `keys:write` | Every `/api/admin/keys*` endpoint: full key lifecycle. |
+| `guardrails:write` | `/api/admin/guardrails/configs*`: list + edit the structured parts of bundled presets. |
+| `prompt_injection:write` | `/api/admin/prompt-injection*`: read/edit/test the prompt-injection config. |
+| `output_leak:write` | `/api/admin/output-leak*`: read/edit/test the [output-leak guardrail](#output-leak-guardrail) config. |
+| `metrics:read` | `GET /metrics`. |
+| `activity:read` | `GET /api/admin/activity/overview`. |
+
+`admin_scopes` is ignored (every scope is implied) on a key with
+`is_admin: true`; it only matters for a key that isn't a full admin. Create
+or update a scoped key the same way as any other, via the [key-lifecycle
+endpoints](#endpoints) below (`POST /api/admin/keys` /
+`PATCH /api/admin/keys/{key_id}`) -- `admin_scopes` is just another field
+on the request body, e.g. `{"id": "prometheus-scraper", "allowed_models":
+[], "admin_scopes": ["metrics:read"]}`. `GET /api/ui/whoami` reports the
+*effective* scope set (already expanded for `is_admin: true` keys), which
+the admin/activity web UI uses to show only the sections a scoped key can
+actually use.
 
 ### Enabling admin access
 
@@ -228,26 +298,70 @@ since that default is an operator choice, not something the client picked.
 
 ### Endpoints
 
-All under `/api/admin/*`, all requiring an `is_admin: true` key:
+All under `/api/admin/*`, each requiring the specific [admin
+scope](#scoped-admin-access) noted below (an `is_admin: true` key
+satisfies all of them):
 
-| Method | Path | Does |
-| --- | --- | --- |
-| GET | `/api/admin/keys` | List all keys (id, `is_admin`, `allowed_models`, `allowed_guardrails_configs`, `requests_per_minute` -- never `key_hash`). |
-| POST | `/api/admin/keys` | Create a new key: `id`, `allowed_models`, and optionally `requests_per_minute`, `is_admin`, `allowed_guardrails_configs`. The raw key is generated server-side and returned exactly once in the response (`api_key`) -- only its hash is ever persisted, so this is the only chance to see it. |
-| PATCH | `/api/admin/keys/{key_id}` | Partially update `allowed_models`, `requests_per_minute`, and/or `is_admin` -- omitted fields are left alone. (`allowed_guardrails_configs` has its own endpoint, below.) |
-| POST | `/api/admin/keys/{key_id}/rotate` | Issue a new raw key for an existing id, replacing its stored hash. The old raw key stops working immediately; the new one is returned once, same as create. |
-| DELETE | `/api/admin/keys/{key_id}` | Revoke a key permanently. |
-| PATCH | `/api/admin/keys/{key_id}/guardrails-configs` | Set a key's `allowed_guardrails_configs` to an explicit list. |
-| GET | `/api/admin/guardrails/configs` | List every discovered `config_id`, plus (for the bundled presets listed in `EDITABLE_CONFIG_MANIFEST`) its current structured, editable fields. |
-| PATCH | `/api/admin/guardrails/configs/{config_id}` | Update those structured fields (e.g. `topic_safety`'s allowed-topics list). Persists to `guardrails_configs/<id>/config.yml` and invalidates that config's in-process cache, so the new rules apply on the very next request. |
-| GET | `/api/admin/prompt-injection` | Current [prompt injection detection](#prompt-injection-detection) config: `enabled`, `scope`, `detect_evasions`, `allow_list`, and `categories` (all 9, each an action). |
-| PATCH | `/api/admin/prompt-injection` | Partially update the above -- `categories` is itself a partial map (only the keys being changed; others are left alone), merged against the on-disk value. Persists to `config/prompt_injection.yaml` and invalidates the in-process cache, live on the very next request. |
-| POST | `/api/admin/prompt-injection/test` | Scan sample `text` against the *currently saved* config (works even while `enabled: false`, and never persists anything) -- returns the resolved action, every matching pattern, and a redacted preview when the action is `redact`. |
+| Method | Path | Scope | Does |
+| --- | --- | --- | --- |
+| GET | `/api/admin/keys` | `keys:write` | List all keys (id, `is_admin`, `admin_scopes`, `allowed_models`, `allowed_guardrails_configs`, `requests_per_minute` -- never `key_hash`). |
+| POST | `/api/admin/keys` | `keys:write` | Create a new key: `id`, `allowed_models`, and optionally `requests_per_minute`, `is_admin`, `admin_scopes`, `allowed_guardrails_configs`. The raw key is generated server-side and returned exactly once in the response (`api_key`) -- only its hash is ever persisted, so this is the only chance to see it. |
+| PATCH | `/api/admin/keys/{key_id}` | `keys:write` | Partially update `allowed_models`, `requests_per_minute`, `is_admin`, and/or `admin_scopes` -- omitted fields are left alone. (`allowed_guardrails_configs` has its own endpoint, below.) |
+| POST | `/api/admin/keys/{key_id}/rotate` | `keys:write` | Issue a new raw key for an existing id, replacing its stored hash. The old raw key stops working immediately; the new one is returned once, same as create. |
+| DELETE | `/api/admin/keys/{key_id}` | `keys:write` | Revoke a key permanently. |
+| PATCH | `/api/admin/keys/{key_id}/guardrails-configs` | `keys:write` | Set a key's `allowed_guardrails_configs` to an explicit list. |
+| GET | `/api/admin/guardrails/configs` | `guardrails:write` | List every discovered `config_id`, plus (for the bundled presets listed in `EDITABLE_CONFIG_MANIFEST`) its current structured, editable fields. |
+| PATCH | `/api/admin/guardrails/configs/{config_id}` | `guardrails:write` | Update those structured fields (e.g. `topic_safety`'s allowed-topics list). Persists to `guardrails_configs/<id>/config.yml` and invalidates that config's in-process cache, so the new rules apply on the very next request. |
+| GET | `/api/admin/prompt-injection` | `prompt_injection:write` | Current [prompt injection detection](#prompt-injection-detection) config: `enabled`, `scope`, `detect_evasions`, `allow_list`, and `categories` (all 9, each an action). |
+| PATCH | `/api/admin/prompt-injection` | `prompt_injection:write` | Partially update the above -- `categories` is itself a partial map (only the keys being changed; others are left alone), merged against the on-disk value. Persists to `config/prompt_injection.yaml` and invalidates the in-process cache, live on the very next request. |
+| POST | `/api/admin/prompt-injection/test` | `prompt_injection:write` | Scan sample `text` against the *currently saved* config (works even while `enabled: false`, and never persists anything) -- returns the resolved action, every matching pattern, and a redacted preview when the action is `redact`. |
+| GET | `/api/admin/output-leak` | `output_leak:write` | Current [output-leak guardrail](#output-leak-guardrail) config: `enabled`, `allow_list`, `categories` (all 6 fixed categories, each an action), `custom_patterns`. |
+| PATCH | `/api/admin/output-leak` | `output_leak:write` | Partially update the above -- `categories` is a partial map (merged against the on-disk value, same as prompt-injection's); `custom_patterns`, if given, fully replaces the list. Persists to `config/output_leak.yaml` and invalidates the in-process cache, live on the very next request. |
+| POST | `/api/admin/output-leak/test` | `output_leak:write` | Scan sample `text` against the *currently saved* config (works even while `enabled: false`, and never persists anything) -- returns the resolved action, every matching pattern, and a redacted preview when the action is `redact`. |
+| GET | `/api/admin/activity/overview` | `activity:read` | Prometheus-backed traffic/usage summary for the [Observability](#observability) dashboard. |
+| GET | `/metrics` | `metrics:read` | Prometheus exposition format -- see [Metrics](#metrics). |
+| GET | `/api/admin/audit-log` | full `is_admin: true` | List recent admin writes, most recent first (`?limit=`, default 50, max 200) -- see [Audit log & revert](#audit-log--revert). |
+| POST | `/api/admin/audit-log/{entry_id}/revert` | full `is_admin: true` | Undo one entry: restores the exact file content from just before that write. |
 
-None of the key-lifecycle endpoints stop an admin from deleting or
-demoting their own key -- there's no special-casing for "the only admin
-key," so it's possible to lock yourself out of the admin API this way,
-same sharp edge as rotating the key you're currently authenticated with.
+`PATCH`/`DELETE` on `/api/admin/keys/{key_id}` refuse a change that would
+leave **no key at all** with `keys:write` access (via `is_admin: true` or
+an explicit `admin_scopes` grant) -- `409 cannot_remove_last_admin_key` --
+since that scope is the one that can always regrant every other admin
+capability, so losing it completely is unrecoverable without hand-editing
+`config/api_keys.yaml` on the host (see
+`app.auth.keys.LastKeysWriteAdminError`). This only guards the *last*
+`keys:write` key, though: with two or more such keys, you can still
+demote/delete/rotate the one you're currently authenticated with, same
+sharp edge as always.
+
+### Audit log & revert
+
+Every write made through the admin API -- key create/update/rotate/delete,
+a guardrails config edit, a prompt-injection config edit, an output-leak
+config edit -- is recorded to
+`config/audit_log.jsonl` (one JSON object per line, append-only) by
+`app/core/audit.py`, capturing who (`actor_key_id`), when, what changed
+(`action`/`summary`), and the *exact full prior text* of the file it wrote
+(`before`). That `before` snapshot is the entire revert mechanism: reverting
+an entry just writes it back to the same file and records the revert itself
+as a new entry, so the log stays a true history rather than something
+that's edited after the fact.
+
+`GET /api/admin/audit-log` and `POST
+/api/admin/audit-log/{entry_id}/revert` both require a full `is_admin: true`
+key, not just any admin scope -- see `require_full_admin` in
+`app/auth/dependency.py`. This is the one deliberate exception to the
+[scoped admin access](#scoped-admin-access) model: the audit log spans
+every resource type (keys, guardrails configs, prompt-injection config),
+so "some admin scope" isn't a coherent boundary for who gets to see or
+undo changes outside their own area.
+
+**Retention:** the log is bounded to the most recent
+`OPENBOUNCER_AUDIT_LOG_MAX_ENTRIES` entries (default `5000`) -- once a
+write pushes it over that, `record_entry()` trims the oldest entries off
+the front of the file. An entry that's aged out this way can no longer be
+listed, fetched, or reverted; there's no external log rotation to
+configure separately.
 
 Only the bundled presets listed in `EDITABLE_CONFIG_MANIFEST`
 (`app/guardrails/editable_config.py` -- see `guardrails_configs/README.md`
@@ -260,24 +374,76 @@ mode](#nemo_library-mode)) -- once discovered, an admin can grant keys
 access to it even though its content stays hand-edit-only.
 
 There's also a small admin panel at `/ui/admin.html` (alongside the
-existing chat-tester `/ui`) covering all of the above: a create-key form,
-a keys table with editable `allowed_models`/`requests_per_minute`/
-`is_admin` (plus Rotate and Delete) and checkboxes per guardrails config,
-an editor per bundled preset with one `<textarea>` per section (one
-item per line), and a "Prompt Injection" card (enable toggle, scope,
-one action dropdown per category, an allow-list textarea, and a "Test
-your patterns" box that calls the `/test` endpoint above). A newly
-created or rotated raw key is shown once in a dismissible callout,
-mirroring the API's own one-time-only behavior. Paste in an
-`is_admin: true` key; a non-admin key gets a clean "access denied"
-instead of a page full of failed requests.
+existing chat-tester `/ui`) covering all of the above: a create-key form
+(with `admin_scopes` checkboxes alongside `is_admin`), a keys table with
+editable `allowed_models`/`requests_per_minute`/`is_admin`/`admin_scopes`
+(plus Rotate and Delete) and checkboxes per guardrails config, an editor
+per bundled preset with one `<textarea>` per section (one item per line),
+a "Prompt Injection" card (enable toggle, scope, one action dropdown per
+category, an allow-list textarea, and a "Test your patterns" box that
+calls the `/test` endpoint above), an "Output-leak guardrail" card (same
+shape, plus an editor for admin-defined custom regex patterns), and an
+"Audit log" table (full
+`is_admin: true` only) with a Revert button per entry. A newly created or
+rotated raw key is shown once in a dismissible callout, mirroring the
+API's own one-time-only behavior. The panel calls `GET /api/ui/whoami`
+first and renders only the sections the pasted key's `admin_scopes`
+actually cover, rather than an all-or-nothing "access denied" -- a key
+scoped to just `metrics:read` + `activity:read`, for example, sees none of
+this panel's sections at all (there's nothing here it can use), while one
+scoped to `guardrails:write` sees a working guardrails editor and nothing
+else.
+
+### Multi-replica deployments
+
+[Rate limiting](#rate-limiting) and [usage accounting](#usage-accounting)
+are safe to run with multiple gateway replicas -- that's exactly what
+their `REDIS_URL` backing exists for, and Redis genuinely coordinates
+across processes.
+
+**Admin writes are a different story.** `config/api_keys.yaml`,
+`config/prompt_injection.yaml`, guardrails config edits, and
+`config/audit_log.jsonl` are all plain files on local disk, written with
+either an in-process `asyncio.Lock` (`app.auth.keys`,
+`app.guardrails.prompt_injection`) or an equivalent no-`await`-in-the-write-path
+guarantee (`app.guardrails.editable_config`, `app.core.audit`) -- both of
+which serialize concurrent writes *within one process*, and neither of
+which is a filesystem-level lock (`flock`/`fcntl`) or coordinates across
+processes at all. Running more than one gateway replica means:
+
+- **If replicas don't share these files** (each has its own local
+  `config/`), they silently diverge: a key created via replica A doesn't
+  exist on replica B until something else syncs the files, and each
+  replica's `/api/admin/audit-log` shows a different, incomplete history.
+  This is the default under `docker-compose.admin.yml` with more than one
+  `gateway` container -- there's no shared volume set up for that case.
+- **If replicas do share these files** (e.g. a common NFS/shared volume),
+  two admin writes landing on two different replicas at the same moment
+  aren't coordinated by either process's lock and can race -- e.g. two
+  concurrent `PATCH`es to the same key on two different replicas can both
+  read the pre-change file and the second write silently clobbers the
+  first's update, the same failure mode the in-process locks exist to
+  prevent for a single replica.
+
+Until this has a real fix (centralizing this state in something that
+actually coordinates writes -- e.g. Redis or a database, the way rate
+limiting/usage accounting already do -- is the likely direction, but is a
+larger change than anything else in this section), the practical
+guidance for a multi-replica deployment is: route all `/api/admin/*`
+traffic to one designated replica (or a separate single-instance admin
+service), rather than treating admin writes as safe to load-balance
+across replicas the way `/v1/*` traffic is.
 
 ## Observability
 
 ### Metrics
 
-`GET /metrics` (Prometheus exposition format, gated by `is_admin: true`
-like the rest of the [Admin API](#admin-api)) covers the gateway itself:
+`GET /metrics` (Prometheus exposition format, gated by the `metrics:read`
+[admin scope](#scoped-admin-access)) covers the gateway itself. Mint a key
+with just `admin_scopes: [metrics:read]` for the scrape config instead of
+reusing a full `is_admin: true` key -- request-rate-by-key is sensitive
+usage data, but a scrape credential has no need for the ability to also
+mint/delete keys or rewrite guardrails/prompt-injection policy.
 
 - `openbouncer_http_requests_total` / `openbouncer_http_request_duration_seconds`
   -- every request, labeled by method/route-template/status. Labeled by
@@ -301,6 +467,14 @@ like the rest of the [Admin API](#admin-api)) covers the gateway itself:
   [prompt injection detection](#prompt-injection-detection) pre-filter:
   how many requests it scanned, every match found (by category and
   detection path), and the action actually applied per request.
+- `openbouncer_output_leak_scanned_total` /
+  `openbouncer_output_leak_matches_total{category}` /
+  `openbouncer_output_leak_actions_total{action}` -- the standalone
+  [output-leak guardrail](#output-leak-guardrail) post-filter: same shape
+  as the prompt-injection metrics above, but for responses instead of
+  requests. Admin-defined `custom_patterns` matches are grouped under
+  `category="custom"` rather than their own name, for the same
+  cardinality reason `app/core/metrics.py` documents elsewhere.
 - `openbouncer_model_inflight_requests` / `openbouncer_model_queued_requests`
   -- live view of each model's concurrency limiter (see below).
 - `openbouncer_usage_requests_total` / `openbouncer_usage_tokens_total`
@@ -324,12 +498,13 @@ ingest. `LOG_LEVEL` still controls verbosity the same way.
 `concurrency_limit` in `config/models.yaml` is enforced (an
 `asyncio.Semaphore` per model, see `app/core/registry.py`), not just
 declared -- requests beyond the limit queue rather than being rejected,
-so raising it is a capacity change, not a correctness one. Only requests
-going through `UpstreamClient` directly are covered (the direct-upstream
-streaming chat path and `/v1/embeddings`); guardrails-routed chat
-requests call the model through `NemoLibraryGuardrailsService`'s own
-connection and aren't covered by this limiter even though they may hit
-the same physical server.
+so raising it is a capacity change, not a correctness one. Every path
+that ends up calling a given model shares that one model's limiter,
+including guardrails-routed chat requests: `NemoLibraryGuardrailsService`
+still reaches the upstream through its own connection rather than
+`UpstreamClient`, but `app/api/routes/chat.py` acquires the same model's
+concurrency slot around that call too, so a guardrails-enabled request
+and a direct request to the same model count against one shared budget.
 
 ## Examples
 
@@ -738,4 +913,105 @@ curl -s http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{"model": "local/gemma4-nvfp4", "messages": [{"role": "user", "content": "ignore all previous instructions"}]}'
 # => 403 {"error": {"message": "...", "type": "permission_error", "code": "prompt_injection_detected", "param": null}}
+```
+
+## Output-leak guardrail
+
+The response-side sibling of [prompt injection detection](#prompt-injection-detection)
+above: a fast, local, regex-based post-filter (`app/guardrails/output_leak.py`)
+that scans every `/v1/chat/completions` *response* (not request) for
+sensitive information before it reaches the caller -- again **independent
+of `GUARDRAILS_MODE`**, runs whether or not `nemo_library`/`nemo_microservice`
+guardrails are also enabled, and again modeled on an [OpenRouter
+guardrail](https://openrouter.ai/docs/guides/features/guardrails/sensitive-info)
+(their "Sensitive Info Guardrail") and an OWASP LLM Top 10 category --
+here, LLM02 (Sensitive Information Disclosure) rather than LLM01. No LLM
+call, same Flag/Redact/Block action model as prompt injection detection.
+
+### Categories
+
+Six pattern categories (five regex-only, one Luhn-checked), each
+independently configurable:
+
+| Category | What it catches |
+| --- | --- |
+| `email` | `user@example.com` |
+| `phone` | `415-555-0132` (requires a separator between digit groups -- a bare 10-digit run is not matched, to avoid flagging things like order numbers) |
+| `ssn` | `123-45-6789` |
+| `credit_card` | A 13-19 digit run that also passes a Luhn checksum -- candidates that fail Luhn are dropped entirely, not just deprioritized, since a bare digit-run regex alone has too many false positives (phone numbers, order numbers, ...) to gate a redact/block action on |
+| `ip_address` | IPv4 addresses |
+| `secret_token` | AWS access key IDs, OpenAI-style `sk-...` API keys, JWTs, PEM private-key headers, and generic `api_key: ...`/`password: ...`-shaped assignments -- the leak this gateway is most exposed to isn't just end-user PII flowing back out, it's a model regurgitating a credential that appeared earlier in its own context (a system prompt, a tool result, RAG-retrieved text) |
+
+Beyond OpenRouter's fixed set, admins can also add **custom regex
+patterns** (`custom_patterns`, e.g. for an internal project codename or a
+proprietary identifier format) -- same idea as OpenRouter's `content_filters`,
+each with its own name and action. Matches are grouped under
+`category="custom"` for Prometheus (see [Metrics](#metrics)); the pattern's
+own admin-chosen name is used in logs and in its redaction placeholder,
+never as a metric label.
+
+Unlike prompt injection detection's single generic `[PROMPT_INJECTION]`
+token, `redact` here uses a category-specific placeholder --
+`[EMAIL]`/`[PHONE]`/`[SSN]`/`[CREDIT_CARD]`/`[IP_ADDRESS]`/`[SECRET]`, or
+`[NAME]` (uppercased) for a custom pattern named `name` -- again matching
+OpenRouter's documented behavior.
+
+**Regex/Luhn only, no NLP name/address detection** (OpenRouter's built-in
+set also includes beta NLP-based person-name and address detection via
+Presidio) -- keeping this a fast, dependency-free pre-filter, matching
+OpenRouter's own "use regex-only presets if latency is critical" guidance.
+
+### Configuration
+
+Configured via `config/output_leak.yaml` (committed with `enabled: false`,
+holds no secrets) or the admin API/UI below -- an admin write persists to
+that file and takes effect on the very next request, no restart:
+
+- `enabled` -- master on/off switch.
+- `allow_list` -- phrases that should never trigger this guardrail (e.g. a
+  support team's own published contact email), case-insensitive substring
+  match against a match's own matched text.
+- `categories` -- per-category action: `disabled`, `flag` (log only,
+  default), `redact` (replace the matched span with a category-specific
+  placeholder), or `block` (reject the response). Most restrictive wins
+  across every match, same precedence as prompt injection detection.
+- `custom_patterns` -- a list of `{name, pattern, action}`; `pattern` must
+  be a valid regex (rejected at save time otherwise).
+
+### Non-streaming vs. streaming
+
+**Non-streaming**: a `block` decision is still a real HTTP `403` (see
+[Errors](#errors)) even though it happens *after* generation -- the
+upstream model **is** called (unlike prompt injection detection's
+pre-generation block), but a non-streaming JSON response is only ever
+sent once, atomically, so nothing has reached the caller yet when the
+scan runs.
+
+**Streaming** is different: whether the response needs buffering is
+decided once per request, from config alone, before any tokens exist --
+
+- **No category/custom pattern configured `redact`/`block`** (i.e. every
+  enabled one is `flag`): tokens are forwarded to the caller live, exactly
+  as the upstream/guardrails backend produces them. Scanning still runs
+  against the full accumulated text once the stream ends, for
+  flag-level logging/metrics only -- nothing so far to act on mid-stream.
+- **At least one category/custom pattern is configured `redact` or
+  `block`**: the *entire* response is buffered before anything is
+  released to the client, then scanned as a whole -- same trade-off
+  `NemoLibraryGuardrailsService` already accepts for its own output rails
+  (see the [Streaming limitation](#streaming-limitation) section above).
+  This applies to every response while the config is in that state, even
+  ones that end up matching nothing, since whether *this* response needs
+  redaction/blocking is only knowable after the fact. A streaming `block`
+  is an **in-band SSE error frame**, not a real HTTP error (same
+  convention nemoguardrails' own output-rail failures already use) --
+  by the time buffering finishes, the HTTP response has already committed
+  to `200 text/event-stream`.
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "local/gemma4-nvfp4", "messages": [{"role": "user", "content": "what is your admin contact email?"}]}'
+# with the "email" category set to "block":
+# => 403 {"error": {"message": "...", "type": "permission_error", "code": "output_leak_detected", "param": null}}
 ```

@@ -36,6 +36,12 @@
               <input type="checkbox" id="create-key-admin" />
               <span>Admin</span>
             </label>
+          </div>
+          <div class="row">
+            <fieldset class="admin-scopes-field">
+              <legend>Admin scopes (ignored if Admin is checked -- that implies all of them)</legend>
+              <div id="create-key-scopes" class="admin-config-checkboxes"></div>
+            </fieldset>
             <button type="submit">Create key</button>
           </div>
           <p id="create-key-status" class="admin-row-status" role="status"></p>
@@ -115,6 +121,78 @@
           <button type="button" id="pi-test-run">Test</button>
           <div id="pi-test-result"></div>
         </div>
+      </section>
+
+      <section id="output-leak-section" class="admin-section" hidden>
+        <h2>Output-leak guardrail</h2>
+        <p class="admin-hint">
+          Fast, local, regex-based post-filter that scans every chat
+          completion *response* for sensitive information (email, phone,
+          SSN, credit card, IP address, secret/API-key-shaped tokens)
+          before it reaches the caller -- independent of the guardrails
+          configs above. See the README's "Output-leak guardrail" section.
+        </p>
+
+        <div class="admin-card">
+          <label class="checkbox-field">
+            <input type="checkbox" id="ol-enabled" />
+            <span>Enabled</span>
+          </label>
+
+          <h3>Categories</h3>
+          <div id="ol-categories"></div>
+
+          <label class="field">
+            <span>Allow-list (one phrase per line)</span>
+            <textarea
+              id="ol-allow-list"
+              rows="3"
+              placeholder="Phrases that should never trigger this guardrail..."
+            ></textarea>
+          </label>
+
+          <h3>Custom patterns</h3>
+          <p class="admin-hint">
+            Admin-defined regex patterns, e.g. an internal project
+            codename. Redacts to <code>[NAME]</code> (uppercased).
+          </p>
+          <div id="ol-custom-patterns"></div>
+          <button type="button" id="ol-add-custom-pattern">Add pattern</button>
+
+          <button type="button" id="ol-save">Save</button>
+          <span id="ol-status" class="admin-row-status" role="status"></span>
+        </div>
+
+        <div class="admin-card">
+          <h3>Test your patterns</h3>
+          <p class="admin-hint">
+            Runs against the currently saved config above (even while
+            disabled) without affecting any real request.
+          </p>
+          <label class="field">
+            <span>Sample text</span>
+            <textarea
+              id="ol-test-input"
+              rows="3"
+              placeholder="Paste sample text to see how it would be scored..."
+            ></textarea>
+          </label>
+          <button type="button" id="ol-test-run">Test</button>
+          <div id="ol-test-result"></div>
+        </div>
+      </section>
+
+      <section id="audit-log-section" class="admin-section" hidden>
+        <h2>Audit log</h2>
+        <p class="admin-hint">
+          Every key/guardrails/prompt-injection write made through this
+          admin API or panel, most recent first. Requires a full
+          <code>is_admin: true</code> key -- it spans every resource type,
+          not just one admin scope. Revert restores the exact file content
+          from just before that entry's write and records the revert
+          itself as a new entry.
+        </p>
+        <div id="audit-log-table"></div>
       </section>
     </main>
 

@@ -5,11 +5,13 @@ import re
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.atomic_write import atomic_write_text
+from app.core.audit import record_entry as record_audit_entry
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "api_keys.yaml"
 
@@ -17,6 +19,30 @@ CONFIG_PATH_ENV_VAR = "OPENBOUNCER_API_KEYS_CONFIG"
 CONFIG_YAML_ENV_VAR = "OPENBOUNCER_API_KEYS_YAML"
 
 DEFAULT_REQUESTS_PER_MINUTE = 60
+
+# Fine-grained admin capabilities a key can be granted without making it a
+# full `is_admin: true` super-admin -- e.g. a Prometheus scrape key that
+# only needs "metrics:read", not the ability to rewrite guardrails policy
+# or mint/delete other keys. See APIKeyRecord.admin_scopes and
+# APIKeyRecord.effective_admin_scopes().
+AdminScope = Literal[
+    "keys:write",
+    "guardrails:write",
+    "prompt_injection:write",
+    "output_leak:write",
+    "metrics:read",
+    "activity:read",
+]
+ALL_ADMIN_SCOPES: frozenset[str] = frozenset(
+    (
+        "keys:write",
+        "guardrails:write",
+        "prompt_injection:write",
+        "output_leak:write",
+        "metrics:read",
+        "activity:read",
+    )
+)
 
 _SHA256_HEX_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -50,6 +76,19 @@ class APIKeyRecord(BaseModel):
     # explicitly sets this to a (possibly empty) list via the admin API --
     # at that point it's an opt-in allowlist, same idea as allowed_models.
     allowed_guardrails_configs: list[str] | None = None
+    # Fine-grained admin capabilities for a key that isn't a full
+    # `is_admin: true` super-admin -- see ALL_ADMIN_SCOPES. Ignored (every
+    # scope is implied) when is_admin is true; only matters for a
+    # deliberately narrower key, e.g. a Prometheus scrape key with just
+    # "metrics:read". Empty by default, same opt-in posture as
+    # allowed_guardrails_configs.
+    admin_scopes: list[AdminScope] = Field(default_factory=list)
+
+    def effective_admin_scopes(self) -> frozenset[str]:
+        """The actual set of admin scopes this key can use: every scope if
+        is_admin, else exactly its own admin_scopes. Centralized here so
+        "is_admin implies everything" is expressed in exactly one place."""
+        return ALL_ADMIN_SCOPES if self.is_admin else frozenset(self.admin_scopes)
 
     @field_validator("key_hash")
     @classmethod
@@ -163,6 +202,36 @@ class KeyAlreadyExistsError(RuntimeError):
     """Raised by create_key() when the requested id is already taken."""
 
 
+class LastKeysWriteAdminError(RuntimeError):
+    """Raised by update_key_fields()/delete_key() when the change would
+    leave no key with the `keys:write` admin scope (via `is_admin: true`
+    or an explicit `admin_scopes` grant) -- refuses to lock the deployment
+    out of its own key-management API. There's no equivalent guard for the
+    other admin scopes (guardrails:write, prompt_injection:write, metrics:read,
+    activity:read): losing those is inconvenient, but keys:write is the one
+    scope that can always regrant every other scope to a key, so it's the
+    one whose complete loss is unrecoverable without hand-editing
+    config/api_keys.yaml on the host.
+    """
+
+
+def _has_keys_write(record: APIKeyRecord) -> bool:
+    return "keys:write" in record.effective_admin_scopes()
+
+
+def _would_strand_key_management(
+    existing_record: APIKeyRecord,
+    config: APIKeyStoreConfig,
+    key_id: str,
+    updated_record: APIKeyRecord,
+) -> bool:
+    if not _has_keys_write(existing_record):
+        return False  # this key never had it -- nothing to lose
+    if _has_keys_write(updated_record):
+        return False  # still has it after the change
+    return not any(k.id != key_id and _has_keys_write(k) for k in config.keys)
+
+
 # Key ids appear in URL paths (/api/admin/keys/{key_id}/...) and log lines
 # -- restricted to a safe charset for new keys, same idea as
 # app.guardrails.service.CONFIG_ID_PATTERN. Checked at the route layer (see
@@ -173,7 +242,9 @@ KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Serializes read-modify-write across concurrent admin requests -- without
 # this, two overlapping PATCHes could both read the pre-change file and the
-# second write would clobber the first's update.
+# second write would clobber the first's update. Process-local: this
+# doesn't coordinate two gateway replicas writing the same api_keys.yaml at
+# once -- see the README's "Multi-replica deployments" section.
 _write_lock = asyncio.Lock()
 
 
@@ -196,14 +267,29 @@ def _load_writable_config() -> APIKeyStoreConfig:
     return APIKeyStoreConfig(**(yaml.safe_load(raw) or {}))
 
 
-def _persist_config(config: APIKeyStoreConfig) -> None:
+def _persist_config(
+    config: APIKeyStoreConfig, *, actor_key_id: str, action: str, summary: str
+) -> None:
     path = _writable_path()
+    before = path.read_text() if path.exists() else "keys: []\n"
     # exclude_none so keys that were never restricted (the common case)
     # keep round-tripping without gaining an explicit
     # `allowed_guardrails_configs: null` line just because some *other*
     # key in the file got edited.
     new_yaml = yaml.safe_dump(config.model_dump(mode="json", exclude_none=True), sort_keys=False)
     atomic_write_text(path, new_yaml)
+    # Recorded only after the write above succeeds -- see app.core.audit's
+    # module docstring for why.
+    record_audit_entry(
+        actor_key_id=actor_key_id,
+        resource_type="api_keys",
+        resource_id=None,
+        action=action,
+        summary=summary,
+        path=path,
+        before=before,
+        after=new_yaml,
+    )
     get_key_store.cache_clear()
 
 
@@ -212,7 +298,7 @@ def generate_api_key() -> str:
     return "sk-" + secrets.token_urlsafe(32)
 
 
-async def create_key(record: APIKeyRecord) -> APIKeyRecord:
+async def create_key(record: APIKeyRecord, *, actor_key_id: str) -> APIKeyRecord:
     """Persists a brand-new key and invalidates get_key_store()'s cache so
     it's live on the very next request -- no restart needed. Raises
     KeyAlreadyExistsError if record.id is already taken, AdminPersistenceError
@@ -223,55 +309,97 @@ async def create_key(record: APIKeyRecord) -> APIKeyRecord:
         if any(k.id == record.id for k in config.keys):
             raise KeyAlreadyExistsError(record.id)
         new_config = APIKeyStoreConfig(keys=[*config.keys, record])
-        _persist_config(new_config)
+        _persist_config(
+            new_config,
+            actor_key_id=actor_key_id,
+            action="create_key",
+            summary=f"Created key '{record.id}' (is_admin={record.is_admin})",
+        )
         return record
 
 
-async def update_key_fields(key_id: str, **fields: object) -> APIKeyRecord:
+async def update_key_fields(
+    key_id: str,
+    *,
+    actor_key_id: str,
+    action: str = "update_key",
+    summary: str | None = None,
+    **fields: object,
+) -> APIKeyRecord:
     """Persists a partial update to an existing key and invalidates
     get_key_store()'s cache. Raises KeyError if key_id doesn't exist,
-    AdminPersistenceError if the store isn't file-backed.
+    AdminPersistenceError if the store isn't file-backed,
+    LastKeysWriteAdminError if the update would remove `keys:write` admin
+    access from the last key that has it. `action`/`summary` let callers
+    that are semantically more specific than a generic field update
+    (rotate_key, update_key_allowed_guardrails_configs) record that in the
+    audit log instead of a generic "updated fields: [...]".
     """
     async with _write_lock:
         config = _load_writable_config()
-        if not any(k.id == key_id for k in config.keys):
+        existing = next((k for k in config.keys if k.id == key_id), None)
+        if existing is None:
             raise KeyError(key_id)
 
-        new_keys = [
-            k.model_copy(update=fields) if k.id == key_id else k for k in config.keys
-        ]
+        updated_record = existing.model_copy(update=fields)
+        if _would_strand_key_management(existing, config, key_id, updated_record):
+            raise LastKeysWriteAdminError(key_id)
+
+        new_keys = [updated_record if k.id == key_id else k for k in config.keys]
         # Re-validate the whole store (not just the one record) before
         # writing, so a bug here can't persist an inconsistent file.
         new_config = APIKeyStoreConfig(keys=new_keys)
-        _persist_config(new_config)
+        _persist_config(
+            new_config,
+            actor_key_id=actor_key_id,
+            action=action,
+            summary=summary or f"Updated key '{key_id}': fields={sorted(fields.keys())}",
+        )
         return next(k for k in new_keys if k.id == key_id)
 
 
-async def delete_key(key_id: str) -> None:
+async def delete_key(key_id: str, *, actor_key_id: str) -> None:
     """Removes a key and invalidates get_key_store()'s cache. Raises
     KeyError if key_id doesn't exist, AdminPersistenceError if the store
-    isn't file-backed.
+    isn't file-backed, LastKeysWriteAdminError if it's the last key with
+    `keys:write` admin access.
     """
     async with _write_lock:
         config = _load_writable_config()
-        if not any(k.id == key_id for k in config.keys):
+        existing = next((k for k in config.keys if k.id == key_id), None)
+        if existing is None:
             raise KeyError(key_id)
+        if _has_keys_write(existing) and not any(
+            k.id != key_id and _has_keys_write(k) for k in config.keys
+        ):
+            raise LastKeysWriteAdminError(key_id)
         new_keys = [k for k in config.keys if k.id != key_id]
-        _persist_config(APIKeyStoreConfig(keys=new_keys))
+        _persist_config(
+            APIKeyStoreConfig(keys=new_keys),
+            actor_key_id=actor_key_id,
+            action="delete_key",
+            summary=f"Deleted key '{key_id}'",
+        )
 
 
-async def rotate_key(key_id: str) -> tuple[APIKeyRecord, str]:
+async def rotate_key(key_id: str, *, actor_key_id: str) -> tuple[APIKeyRecord, str]:
     """Issues a new raw key for an existing key id, replacing its stored
     hash. Returns (record, raw_key) -- the raw key is never persisted or
     retrievable again after this. Raises KeyError if key_id doesn't exist.
     """
     raw_key = generate_api_key()
-    record = await update_key_fields(key_id, key_hash=hash_api_key(raw_key))
+    record = await update_key_fields(
+        key_id,
+        actor_key_id=actor_key_id,
+        action="rotate_key",
+        summary=f"Rotated key '{key_id}'",
+        key_hash=hash_api_key(raw_key),
+    )
     return record, raw_key
 
 
 async def update_key_allowed_guardrails_configs(
-    key_id: str, allowed_guardrails_configs: list[str]
+    key_id: str, allowed_guardrails_configs: list[str], *, actor_key_id: str
 ) -> APIKeyRecord:
     """Persists a key's allowed_guardrails_configs to disk and invalidates
     get_key_store()'s cache so the change is live on the very next request
@@ -279,5 +407,9 @@ async def update_key_allowed_guardrails_configs(
     AdminPersistenceError if the store isn't file-backed.
     """
     return await update_key_fields(
-        key_id, allowed_guardrails_configs=list(allowed_guardrails_configs)
+        key_id,
+        actor_key_id=actor_key_id,
+        action="update_key_guardrails_configs",
+        summary=f"Set key '{key_id}' allowed_guardrails_configs={allowed_guardrails_configs}",
+        allowed_guardrails_configs=list(allowed_guardrails_configs),
     )
