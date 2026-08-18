@@ -4,7 +4,7 @@ import time
 
 from fastapi import APIRouter, Depends, Query
 
-from app.auth.dependency import AuthContext, require_admin
+from app.auth.dependency import AuthContext, require_scope
 from app.core.errors import OpenAIError
 from app.prometheus.client import PrometheusClient, PrometheusError, get_prometheus_client
 from app.schemas.activity import (
@@ -69,7 +69,7 @@ def _instant_value(result: list[dict]) -> float | None:
 async def activity_overview(
     window: str = Query("24h", alias="range", pattern="^(1h|24h|7d|30d)$"),
     prometheus: PrometheusClient | None = Depends(get_prometheus_client),
-    auth: AuthContext = Depends(require_admin),
+    auth: AuthContext = Depends(require_scope("activity:read")),
 ) -> ActivityOverviewResponse:
     if prometheus is None:
         raise OpenAIError(

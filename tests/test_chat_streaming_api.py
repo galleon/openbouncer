@@ -211,6 +211,143 @@ async def test_stream_missing_api_key_returns_json_error(client, monkeypatch):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_stream_chat_completion_always_asks_upstream_for_usage():
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, content=_sse_body("[DONE]")))
+    request = ChatCompletionRequest(
+        model="nvidia/qwen3.6-nvfp4", messages=[{"role": "user", "content": "hi"}], stream=True
+    )
+    upstream_client = UpstreamClient()
+    async for _ in upstream_client.stream_chat_completion(
+        base_url=BASE_URL, api_key="k", upstream_model="m", request=request
+    ):
+        pass
+
+    route = respx.calls.last
+    payload = json.loads(route.request.content)
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_chat_completion_captures_usage_but_does_not_relay_by_default():
+    content_chunk = json.dumps(
+        {"id": "c1", "object": "chat.completion.chunk", "choices": [{"delta": {"content": "hi"}}]}
+    )
+    usage_chunk = json.dumps(
+        {
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+    )
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(200, content=_sse_body(content_chunk, usage_chunk, "[DONE]"))
+    )
+    request = ChatCompletionRequest(
+        model="nvidia/qwen3.6-nvfp4", messages=[{"role": "user", "content": "hi"}], stream=True
+    )
+    upstream_client = UpstreamClient()
+    usage_holder: dict[str, int] = {}
+    frames = [
+        chunk
+        async for chunk in upstream_client.stream_chat_completion(
+            base_url=BASE_URL,
+            api_key="k",
+            upstream_model="m",
+            request=request,
+            usage_holder=usage_holder,
+        )
+    ]
+
+    assert usage_holder == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert any(content_chunk in f for f in frames)
+    # The client didn't set stream_options.include_usage -- the usage-only
+    # chunk is captured for our own accounting but not relayed to them.
+    assert not any(usage_chunk in f for f in frames)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_chat_completion_relays_usage_chunk_when_client_requested_it():
+    usage_chunk = json.dumps(
+        {
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(200, content=_sse_body(usage_chunk, "[DONE]"))
+    )
+    request = ChatCompletionRequest(
+        model="nvidia/qwen3.6-nvfp4",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    upstream_client = UpstreamClient()
+    usage_holder: dict[str, int] = {}
+    frames = [
+        chunk
+        async for chunk in upstream_client.stream_chat_completion(
+            base_url=BASE_URL,
+            api_key="k",
+            upstream_model="m",
+            request=request,
+            usage_holder=usage_holder,
+        )
+    ]
+
+    assert usage_holder["total_tokens"] == 2
+    assert any(usage_chunk in f for f in frames)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_route_records_real_usage_from_upstream_usage_chunk(client):
+    from app.auth.usage import UsageTracker, get_usage_tracker
+    from app.main import app
+
+    usage_chunk = json.dumps(
+        {
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+        }
+    )
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(200, content=_sse_body(usage_chunk, "[DONE]"))
+    )
+
+    tracker = UsageTracker()
+    app.dependency_overrides[get_usage_tracker] = lambda: tracker
+    try:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local/gemma4-nvfp4",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        assert response.status_code == 200
+        # The caller didn't ask for stream_options.include_usage, so the
+        # usage-only chunk must not appear in what they actually received.
+        assert usage_chunk not in response.text
+
+        stats = await tracker.get("test-key")
+        assert stats.prompt_tokens == 7
+        assert stats.completion_tokens == 4
+        assert stats.total_tokens == 11
+    finally:
+        app.dependency_overrides.pop(get_usage_tracker, None)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_disconnect_closes_upstream_connection():
     stream = _TrackingStream(
         [

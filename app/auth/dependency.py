@@ -23,6 +23,13 @@ class AuthContext:
     # in app.auth.keys for why this is nullable rather than defaulting to
     # an empty (deny-everything) list.
     allowed_guardrails_configs: list[str] | None = None
+    # Already the *effective* set (APIKeyRecord.effective_admin_scopes()) --
+    # every scope if is_admin, else exactly the key's own admin_scopes. See
+    # require_scope() below, which is the only thing that reads this.
+    admin_scopes: frozenset[str] = frozenset()
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in self.admin_scopes
 
 
 def _redact(raw_key: str) -> str:
@@ -86,18 +93,57 @@ async def require_api_key(
             if record.allowed_guardrails_configs is not None
             else None
         ),
+        admin_scopes=record.effective_admin_scopes(),
     )
 
 
-async def require_admin(auth: AuthContext = Depends(require_api_key)) -> AuthContext:
+def require_scope(scope: str):
+    """Dependency factory: requires the given admin scope (see
+    app.auth.keys.ALL_ADMIN_SCOPES). `is_admin: true` keys satisfy every
+    scope via AuthContext.admin_scopes already being fully expanded (see
+    APIKeyRecord.effective_admin_scopes()), so this one mechanism covers
+    both full admins and narrowly-scoped keys for anything tied to a single
+    resource type. See require_full_admin below for the one exception.
+    """
+
+    async def _require_scope(auth: AuthContext = Depends(require_api_key)) -> AuthContext:
+        if not auth.has_scope(scope):
+            logger.warning(
+                "Forbidden: key_id=%s lacks admin scope=%s [request_id=%s]",
+                auth.key_id,
+                scope,
+                get_request_id(),
+            )
+            raise OpenAIError(
+                f"Your API key does not have the `{scope}` admin scope.",
+                status_code=403,
+                error_type="permission_error",
+                code="admin_required",
+            )
+        return auth
+
+    return _require_scope
+
+
+async def require_full_admin(auth: AuthContext = Depends(require_api_key)) -> AuthContext:
+    """Requires is_admin: true specifically, not just some admin scope --
+    for capabilities that are inherently cross-cutting across every scoped
+    resource rather than tied to one of them, where "some admin scope"
+    isn't a coherent authorization boundary. Currently just the audit log
+    (GET /api/admin/audit-log) and revert (POST
+    /api/admin/audit-log/{id}/revert): both can surface and roll back
+    changes to *any* resource type (keys, guardrails configs,
+    prompt-injection config), so a key scoped to only one of those doesn't
+    get to see or undo changes outside its own scope.
+    """
     if not auth.is_admin:
         logger.warning(
-            "Forbidden: key_id=%s lacks admin access [request_id=%s]",
+            "Forbidden: key_id=%s is not a full admin [request_id=%s]",
             auth.key_id,
             get_request_id(),
         )
         raise OpenAIError(
-            "Your API key does not have admin access.",
+            "This endpoint requires a full `is_admin: true` key.",
             status_code=403,
             error_type="permission_error",
             code="admin_required",

@@ -7,6 +7,11 @@ __pycache__/
 # Real API key config (contains key hashes) -- keep only the .example.yaml template tracked.
 /config/api_keys.yaml
 
+# Admin action audit log (app/core/audit.py) -- a runtime-generated file,
+# same reasoning as api_keys.yaml (it can contain full before/after config
+# file snapshots, including key_hash values).
+/config/audit_log.jsonl
+
 # docker-compose env overrides (REDIS_URL, HF_TOKEN, VLLM_IMAGE, etc.) -- local machine config, may hold secrets.
 /.env
 
@@ -15,3 +20,6 @@ __pycache__/
 
 # UI design reference screenshots -- not project source, may be large binaries.
 /samples/
+
+# macOS Finder metadata.
+.DS_Store

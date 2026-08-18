@@ -30,6 +30,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.atomic_write import atomic_write_text
+from app.core.audit import record_entry as record_audit_entry
 from app.schemas.chat import ChatCompletionRequest, ChatMessage, TextContentPart
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "prompt_injection.yaml"
@@ -483,14 +484,32 @@ def get_prompt_injection_config() -> PromptInjectionConfig:
 
 
 # Serializes read-modify-write across concurrent admin requests, same
-# reasoning as app.auth.keys._write_lock.
+# reasoning (and same process-local-only scope -- see the README's
+# "Multi-replica deployments" section) as app.auth.keys._write_lock.
 _write_lock = asyncio.Lock()
 
 
-def _persist_config(config: PromptInjectionConfig) -> None:
+def _persist_config(config: PromptInjectionConfig, *, actor_key_id: str, summary: str) -> None:
     path = _resolve_config_path()
+    before = (
+        path.read_text()
+        if path.exists()
+        else yaml.safe_dump(PromptInjectionConfig().model_dump(mode="json"), sort_keys=False)
+    )
     new_yaml = yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False)
     atomic_write_text(path, new_yaml)
+    # Recorded only after the write above succeeds -- see app.core.audit's
+    # module docstring for why.
+    record_audit_entry(
+        actor_key_id=actor_key_id,
+        resource_type="prompt_injection",
+        resource_id=None,
+        action="update_prompt_injection_config",
+        summary=summary,
+        path=path,
+        before=before,
+        after=new_yaml,
+    )
     get_prompt_injection_config.cache_clear()
 
 
@@ -517,6 +536,7 @@ def redact_preview(text: str, matches: list[CategoryMatch]) -> str:
 
 async def update_prompt_injection_config(
     *,
+    actor_key_id: str,
     enabled: bool | None = None,
     scope: InjectionScope | None = None,
     detect_evasions: bool | None = None,
@@ -550,5 +570,9 @@ async def update_prompt_injection_config(
             updates["categories"] = merged_categories
 
         updated = current.model_copy(update=updates)
-        _persist_config(updated)
+        _persist_config(
+            updated,
+            actor_key_id=actor_key_id,
+            summary=f"Updated prompt-injection config: fields={sorted(updates.keys())}",
+        )
         return updated

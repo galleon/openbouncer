@@ -59,6 +59,22 @@ class GuardrailsOptions(BaseModel):
     preset: str | None = None
 
 
+class StreamOptions(BaseModel):
+    """OpenAI's `stream_options` -- currently just `include_usage`, which
+    asks for one extra final SSE chunk (empty `choices`, a top-level
+    `usage` object) right before `[DONE]`. See
+    UpstreamClient.stream_chat_completion, which always sets this on the
+    *upstream* request regardless of what the caller of this gateway asked
+    for (so OpenBouncer can capture real usage for its own accounting),
+    but only relays that extra chunk back to the caller if they opted in
+    here -- matching what a client library actually expects to receive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    include_usage: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -68,6 +84,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float | None = Field(default=1.0, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
     stream: bool | None = False
+    stream_options: StreamOptions | None = None
     stop: str | list[str] | None = None
     user: str | None = None
     guardrails: GuardrailsOptions | None = None

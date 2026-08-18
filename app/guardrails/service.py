@@ -111,6 +111,13 @@ class GuardrailsService(ABC):
     -- the exact same contract as UpstreamClient.stream_chat_completion, so
     callers can relay either one the same way. The default implementation
     here raises, for backends that don't support streaming yet.
+
+    `usage_holder`, if given, is filled in with prompt_tokens/
+    completion_tokens/total_tokens once the stream completes -- same
+    optional-out-param contract as UpstreamClient.stream_chat_completion,
+    so app/api/routes/chat.py can capture usage from either source
+    identically. A backend that has no way to estimate usage (or never
+    reaches this method) just leaves it empty.
     """
 
     @abstractmethod
@@ -120,7 +127,7 @@ class GuardrailsService(ABC):
         raise NotImplementedError
 
     async def stream_chat_completion(
-        self, request: ChatCompletionRequest
+        self, request: ChatCompletionRequest, *, usage_holder: dict[str, int] | None = None
     ) -> AsyncIterator[str] | None:
         raise OpenAIError(
             "Streaming is not supported yet for this guardrails mode.",
@@ -144,7 +151,7 @@ class DisabledGuardrailsService(GuardrailsService):
         return None
 
     async def stream_chat_completion(
-        self, request: ChatCompletionRequest
+        self, request: ChatCompletionRequest, *, usage_holder: dict[str, int] | None = None
     ) -> AsyncIterator[str] | None:
         return None
 
@@ -485,7 +492,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
         )
 
     async def stream_chat_completion(
-        self, request: ChatCompletionRequest
+        self, request: ChatCompletionRequest, *, usage_holder: dict[str, int] | None = None
     ) -> AsyncIterator[str]:
         # Plain coroutine (not itself a generator): resolves config_id and
         # loads/caches the rails first, so a bad config_id or a load failure
@@ -498,13 +505,35 @@ class NemoLibraryGuardrailsService(GuardrailsService):
         config_id = self._resolve_config_id(request)
         rails = await self._get_rails(config_id)
         nemo_messages = _to_nemo_messages(request.messages)
-        return self._stream_response(rails, nemo_messages, request.model)
+        return self._stream_response(rails, nemo_messages, request.model, usage_holder)
 
     async def _stream_response(
-        self, rails: LLMRails, nemo_messages: list[dict], model: str
+        self,
+        rails: LLMRails,
+        nemo_messages: list[dict],
+        model: str,
+        usage_holder: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
+        prompt_tokens = sum(_count_tokens(m["content"]) for m in nemo_messages)
+
+        def _record_usage(completion_text: str) -> None:
+            # nemoguardrails doesn't expose real per-token usage through
+            # either generate_async() or stream_async() -- this is the
+            # same word-count heuristic _bot_message_to_chat_completion
+            # already uses for the buffered/non-streaming path, not a real
+            # count from the underlying LLM. Only called on paths that
+            # actually produced a (possibly empty) completion -- an
+            # interrupted/errored stream leaves usage_holder untouched, so
+            # callers still count the request itself with no fabricated
+            # success-shaped token counts.
+            if usage_holder is None:
+                return
+            completion_tokens = _count_tokens(completion_text)
+            usage_holder["prompt_tokens"] = prompt_tokens
+            usage_holder["completion_tokens"] = completion_tokens
+            usage_holder["total_tokens"] = prompt_tokens + completion_tokens
 
         if _has_output_rails(rails.config):
             # Buffered output-rails mode -- see class docstring and README.
@@ -519,6 +548,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
                 ) from exc
 
             content = _bot_message_content(bot_message)
+            _record_usage(content)
             yield _sse_chunk(response_id, created, model, delta={"content": content})
             yield _sse_chunk(response_id, created, model, delta={}, finish_reason="stop")
             yield "data: [DONE]\n\n"
@@ -530,6 +560,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
         try:
             first_token = await token_iterator.__anext__()
         except StopAsyncIteration:
+            _record_usage("")
             yield _sse_chunk(response_id, created, model, delta={}, finish_reason="stop")
             yield "data: [DONE]\n\n"
             return
@@ -543,6 +574,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
             yield "data: [DONE]\n\n"
             return
 
+        accumulated = [first_token]
         yield _sse_chunk(response_id, created, model, delta={"content": first_token})
 
         try:
@@ -552,6 +584,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
                     yield error_frame
                     yield "data: [DONE]\n\n"
                     return
+                accumulated.append(token)
                 yield _sse_chunk(response_id, created, model, delta={"content": token})
         except Exception as exc:
             yield format_sse_error(
@@ -565,6 +598,7 @@ class NemoLibraryGuardrailsService(GuardrailsService):
             yield "data: [DONE]\n\n"
             return
 
+        _record_usage("".join(accumulated))
         yield _sse_chunk(response_id, created, model, delta={}, finish_reason="stop")
         yield "data: [DONE]\n\n"
 

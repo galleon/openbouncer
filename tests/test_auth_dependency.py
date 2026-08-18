@@ -7,10 +7,10 @@ from app.auth.dependency import (
     AuthContext,
     ensure_guardrails_config_allowed,
     ensure_model_allowed,
-    require_admin,
     require_api_key,
+    require_scope,
 )
-from app.auth.keys import parse_key_store
+from app.auth.keys import ALL_ADMIN_SCOPES, APIKeyRecord, parse_key_store
 from app.auth.rate_limiter import RateLimiter
 from app.core.errors import OpenAIError
 
@@ -111,21 +111,95 @@ class TestEnsureModelAllowed:
         assert exc_info.value.param == "model"
 
 
-class TestRequireAdmin:
+class TestAuthContextHasScope:
+    def test_scope_present_is_true(self):
+        auth = AuthContext(key_id="k", allowed_models=[], admin_scopes=frozenset({"metrics:read"}))
+        assert auth.has_scope("metrics:read") is True
+
+    def test_scope_absent_is_false(self):
+        auth = AuthContext(key_id="k", allowed_models=[], admin_scopes=frozenset({"metrics:read"}))
+        assert auth.has_scope("keys:write") is False
+
+    def test_default_has_no_scopes(self):
+        auth = AuthContext(key_id="k", allowed_models=[])
+        assert auth.has_scope("metrics:read") is False
+
+
+class TestRequireScope:
     @pytest.mark.asyncio
-    async def test_admin_key_passes_through(self):
-        auth = AuthContext(key_id="k", allowed_models=[], is_admin=True)
-        result = await require_admin(auth=auth)
+    async def test_key_with_scope_passes_through(self):
+        auth = AuthContext(key_id="k", allowed_models=[], admin_scopes=frozenset({"metrics:read"}))
+        dependency = require_scope("metrics:read")
+        result = await dependency(auth=auth)
         assert result is auth
 
     @pytest.mark.asyncio
-    async def test_non_admin_key_rejected(self):
-        auth = AuthContext(key_id="k", allowed_models=[], is_admin=False)
+    async def test_key_without_scope_rejected(self):
+        auth = AuthContext(key_id="k", allowed_models=[], admin_scopes=frozenset({"metrics:read"}))
+        dependency = require_scope("keys:write")
         with pytest.raises(OpenAIError) as exc_info:
-            await require_admin(auth=auth)
+            await dependency(auth=auth)
         assert exc_info.value.status_code == 403
         assert exc_info.value.error_type == "permission_error"
         assert exc_info.value.code == "admin_required"
+
+    @pytest.mark.asyncio
+    async def test_full_admin_satisfies_every_scope(self):
+        # is_admin: true keys carry the fully-expanded scope set (see
+        # APIKeyRecord.effective_admin_scopes()), not a special-cased
+        # bypass -- require_scope has no separate "or is_admin" branch.
+        auth = AuthContext(key_id="k", allowed_models=[], is_admin=True, admin_scopes=ALL_ADMIN_SCOPES)
+        for scope in ALL_ADMIN_SCOPES:
+            result = await require_scope(scope)(auth=auth)
+            assert result is auth
+
+    @pytest.mark.asyncio
+    async def test_key_with_no_scopes_rejected(self):
+        auth = AuthContext(key_id="k", allowed_models=[])
+        with pytest.raises(OpenAIError) as exc_info:
+            await require_scope("metrics:read")(auth=auth)
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.code == "admin_required"
+
+
+class TestEffectiveAdminScopes:
+    def test_is_admin_implies_every_scope(self):
+        record = APIKeyRecord(
+            id="k", key_hash=KEY_HASH, allowed_models=["m"], is_admin=True
+        )
+        assert record.effective_admin_scopes() == ALL_ADMIN_SCOPES
+
+    def test_non_admin_uses_explicit_admin_scopes_only(self):
+        record = APIKeyRecord(
+            id="k",
+            key_hash=KEY_HASH,
+            allowed_models=["m"],
+            admin_scopes=["metrics:read"],
+        )
+        assert record.effective_admin_scopes() == frozenset({"metrics:read"})
+
+    def test_non_admin_with_no_admin_scopes_has_none(self):
+        record = APIKeyRecord(id="k", key_hash=KEY_HASH, allowed_models=["m"])
+        assert record.effective_admin_scopes() == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_require_api_key_populates_scoped_key_correctly(self):
+        scoped_hash = hashlib.sha256(b"sk-scoped").hexdigest()
+        store = parse_key_store(
+            f"""
+keys:
+  - id: scoped-key
+    key_hash: {scoped_hash}
+    allowed_models: [m]
+    admin_scopes: [metrics:read, activity:read]
+"""
+        )
+        limiter = RateLimiter()
+        auth = await require_api_key(
+            credentials=_credentials("sk-scoped"), key_store=store, rate_limiter=limiter
+        )
+        assert auth.admin_scopes == frozenset({"metrics:read", "activity:read"})
+        assert auth.is_admin is False
 
 
 class TestEnsureGuardrailsConfigAllowed:

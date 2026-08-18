@@ -21,6 +21,7 @@ import yaml
 from nemoguardrails import RailsConfig
 
 from app.core.atomic_write import atomic_write_text
+from app.core.audit import record_entry as record_audit_entry
 from app.guardrails.service import GuardrailsService
 
 _MAX_ITEMS = 100
@@ -230,13 +231,24 @@ def write_editable_sections(
     config_id: str,
     updates: dict[str, list[str]],
     guardrails_service: GuardrailsService,
+    *,
+    actor_key_id: str,
 ) -> dict[str, list[str]]:
     """Validates, splices, re-reads to confirm the round-trip, writes
     atomically, confirms the new file still loads via RailsConfig (rolling
-    back on failure), then invalidates the cache entry for config_id so the
-    change is live on the next request. Raises KeyError if config_id isn't
-    editable, ValueError on bad input, GuardrailsConfigParseError if the
-    file's shape doesn't match or the post-write reload fails.
+    back on failure), records an audit log entry, then invalidates the
+    cache entry for config_id so the change is live on the next request.
+    Raises KeyError if config_id isn't editable, ValueError on bad input,
+    GuardrailsConfigParseError if the file's shape doesn't match or the
+    post-write reload fails.
+
+    Unlike app.auth.keys/app.guardrails.prompt_injection, this function
+    doesn't take an explicit asyncio.Lock -- it doesn't need one, since
+    (like app.core.audit.record_entry) its entire body has no `await`
+    point, so two concurrent calls in this process can never interleave
+    mid-write regardless. That guarantee is process-local, though -- see
+    the README's "Multi-replica deployments" section for why it doesn't
+    extend to two gateway replicas writing the same file at once.
     """
     sections = EDITABLE_CONFIG_MANIFEST.get(config_id)
     if sections is None:
@@ -288,5 +300,17 @@ def write_editable_sections(
             f"New config failed to load, rolled back: {exc}"
         ) from exc
 
+    # Recorded only after the write above is confirmed valid (reload
+    # succeeded) -- see app.core.audit's module docstring for why.
+    record_audit_entry(
+        actor_key_id=actor_key_id,
+        resource_type="guardrails_config",
+        resource_id=config_id,
+        action="update_guardrails_config",
+        summary=f"Updated guardrails config '{config_id}': sections={sorted(updates.keys())}",
+        path=config_path,
+        before=original_text,
+        after=text,
+    )
     guardrails_service.invalidate(config_id)
     return reread

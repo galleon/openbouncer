@@ -52,6 +52,65 @@ def scratch_keys_file(tmp_path, monkeypatch):
         real_get_key_store.cache_clear()
 
 
+SCRATCH_ADMIN_HASH = hashlib.sha256(b"sk-scratch-admin").hexdigest()
+SCRATCH_SINGLE_ADMIN_YAML = f"""
+keys:
+  - id: scratch-admin
+    key_hash: {SCRATCH_ADMIN_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    requests_per_minute: 60
+    is_admin: true
+"""
+
+SCRATCH_ADMIN_2_HASH = hashlib.sha256(b"sk-scratch-admin-2").hexdigest()
+SCRATCH_TWO_ADMINS_YAML = f"""
+keys:
+  - id: scratch-admin
+    key_hash: {SCRATCH_ADMIN_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    requests_per_minute: 60
+    is_admin: true
+  - id: scratch-admin-2
+    key_hash: {SCRATCH_ADMIN_2_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    requests_per_minute: 60
+    is_admin: true
+"""
+
+
+@pytest.fixture
+def scratch_keys_file_single_admin(tmp_path, monkeypatch):
+    """A scratch api_keys.yaml with exactly one key, and it's the only
+    admin (is_admin: true) -- used to test the LastKeysWriteAdminError
+    guard (app.auth.keys._would_strand_key_management). Same reasoning as
+    scratch_keys_file above."""
+    path = tmp_path / "api_keys.yaml"
+    path.write_text(SCRATCH_SINGLE_ADMIN_YAML)
+    monkeypatch.delenv(CONFIG_YAML_ENV_VAR, raising=False)
+    monkeypatch.setenv(CONFIG_PATH_ENV_VAR, str(path))
+    real_get_key_store.cache_clear()
+    try:
+        yield path
+    finally:
+        real_get_key_store.cache_clear()
+
+
+@pytest.fixture
+def scratch_keys_file_two_admins(tmp_path, monkeypatch):
+    """Same as scratch_keys_file_single_admin, but with a second admin key
+    present -- used to prove the guard only blocks removing the *last*
+    keys:write key, not any admin key."""
+    path = tmp_path / "api_keys.yaml"
+    path.write_text(SCRATCH_TWO_ADMINS_YAML)
+    monkeypatch.delenv(CONFIG_YAML_ENV_VAR, raising=False)
+    monkeypatch.setenv(CONFIG_PATH_ENV_VAR, str(path))
+    real_get_key_store.cache_clear()
+    try:
+        yield path
+    finally:
+        real_get_key_store.cache_clear()
+
+
 @pytest.fixture
 def guardrails_configs_copy(tmp_path, monkeypatch):
     """A scratch copy of the real guardrails_configs/ (not
@@ -94,6 +153,16 @@ class TestListKeys:
     @pytest.mark.asyncio
     async def test_non_admin_rejected(self, client):
         response = await client.get("/api/admin/keys")
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "admin_required"
+
+    @pytest.mark.asyncio
+    async def test_scoped_non_keys_write_key_rejected(self, observer_client):
+        # observer_client (conftest.py) has metrics:read + activity:read
+        # but not keys:write -- proves admin_scopes actually separates
+        # "can view dashboards" from "can mint/delete keys", not just
+        # is_admin vs. not.
+        response = await observer_client.get("/api/admin/keys")
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "admin_required"
 
@@ -249,6 +318,34 @@ class TestCreateKey:
         assert response.json()["error"]["code"] == "guardrails_config_not_found"
 
     @pytest.mark.asyncio
+    async def test_unknown_admin_scope_rejected(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={
+                "id": "custom-key",
+                "allowed_models": ["local/gemma4-nvfp4"],
+                "admin_scopes": ["not_a_real_scope"],
+            },
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_admin_scope"
+
+    @pytest.mark.asyncio
+    async def test_admin_scopes_round_trip(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={
+                "id": "scoped-key",
+                "allowed_models": ["local/gemma4-nvfp4"],
+                "admin_scopes": ["metrics:read", "activity:read"],
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()["key"]
+        assert sorted(body["admin_scopes"]) == ["activity:read", "metrics:read"]
+        assert body["is_admin"] is False
+
+    @pytest.mark.asyncio
     async def test_happy_path_returns_raw_key_and_is_live_without_restart(
         self, admin_client, scratch_keys_file
     ):
@@ -346,6 +443,26 @@ class TestUpdateKey:
             "/api/admin/keys/scratch-key", json={"allowed_models": []}
         )
         assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_grant_admin_scopes_is_live_without_restart(
+        self, admin_client, scratch_keys_file
+    ):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"admin_scopes": ["metrics:read"]}
+        )
+        assert response.status_code == 200
+        assert response.json()["admin_scopes"] == ["metrics:read"]
+        record = real_get_key_store().get_by_id("scratch-key")
+        assert record.admin_scopes == ["metrics:read"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_admin_scope_rejected(self, admin_client, scratch_keys_file):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"admin_scopes": ["not_a_real_scope"]}
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_admin_scope"
 
 
 class TestRotateKey:
@@ -857,3 +974,215 @@ class TestPromptInjectionTest:
 
         after = (await admin_client.get("/api/admin/prompt-injection")).json()
         assert after == before
+
+
+class TestAuditLog:
+    @pytest.mark.asyncio
+    async def test_non_admin_rejected(self, client):
+        response = await client.get("/api/admin/audit-log")
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_scoped_non_full_admin_rejected(self, observer_client):
+        # observer_client (conftest.py) has metrics:read + activity:read --
+        # real admin scopes, but not is_admin -- and the audit log is
+        # gated by require_full_admin specifically (it can see/revert
+        # changes across every resource type, not just one). See
+        # app.auth.dependency.require_full_admin's docstring.
+        response = await observer_client.get("/api/admin/audit-log")
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_key_write_records_an_entry(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={"id": "audited-key", "allowed_models": ["local/gemma4-nvfp4"]},
+        )
+        assert response.status_code == 201
+
+        log_response = await admin_client.get("/api/admin/audit-log")
+        assert log_response.status_code == 200
+        entries = log_response.json()["entries"]
+        assert entries[0]["action"] == "create_key"
+        assert entries[0]["resource_type"] == "api_keys"
+        assert entries[0]["actor_key_id"] == "admin-key"
+        assert "audited-key" in entries[0]["summary"]
+
+    @pytest.mark.asyncio
+    async def test_revert_unknown_entry_is_404(self, admin_client):
+        response = await admin_client.post("/api/admin/audit-log/does-not-exist/revert")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "audit_entry_not_found"
+
+    @pytest.mark.asyncio
+    async def test_revert_key_update_restores_prior_fields(self, admin_client, scratch_keys_file):
+        update_response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"requests_per_minute": 5}
+        )
+        assert update_response.status_code == 200
+        assert update_response.json()["requests_per_minute"] == 5
+
+        entries = (await admin_client.get("/api/admin/audit-log")).json()["entries"]
+        entry_id = entries[0]["id"]
+        assert entries[0]["action"] == "update_key"
+
+        revert_response = await admin_client.post(f"/api/admin/audit-log/{entry_id}/revert")
+        assert revert_response.status_code == 200
+        body = revert_response.json()
+        assert body["reverted_entry"]["id"] == entry_id
+        assert body["revert_entry"]["action"] == "revert"
+
+        # Live immediately, no restart -- same "no restart needed"
+        # guarantee every other admin write already gives.
+        record = real_get_key_store().get_by_id("scratch-key")
+        assert record.requests_per_minute == 60  # SCRATCH_YAML's original value
+
+    @pytest.mark.asyncio
+    async def test_revert_guardrails_config_edit(self, admin_client, guardrails_configs_copy):
+        dest, _service = guardrails_configs_copy
+        config_path = dest / "topic_safety" / "config.yml"
+        original_text = config_path.read_text()
+
+        response = await admin_client.patch(
+            "/api/admin/guardrails/configs/topic_safety",
+            json={"sections": {"allowed_topics": ["cooking", "gardening"]}},
+        )
+        assert response.status_code == 200
+
+        entries = (await admin_client.get("/api/admin/audit-log")).json()["entries"]
+        entry = entries[0]
+        assert entry["action"] == "update_guardrails_config"
+        assert entry["resource_type"] == "guardrails_config"
+        assert entry["resource_id"] == "topic_safety"
+
+        revert_response = await admin_client.post(f"/api/admin/audit-log/{entry['id']}/revert")
+        assert revert_response.status_code == 200
+        assert config_path.read_text() == original_text
+
+        # The reverted config still reads back correctly through the
+        # normal admin listing (proves the in-process cache was
+        # invalidated, not just the file changed on disk).
+        get_response = await admin_client.get("/api/admin/guardrails/configs")
+        topic_safety = next(
+            c for c in get_response.json()["configs"] if c["config_id"] == "topic_safety"
+        )
+        assert topic_safety["sections"][0]["items"] != ["cooking", "gardening"]
+
+    @pytest.mark.asyncio
+    async def test_revert_prompt_injection_config_edit(
+        self, admin_client, scratch_prompt_injection_file
+    ):
+        before = (await admin_client.get("/api/admin/prompt-injection")).json()
+
+        response = await admin_client.patch(
+            "/api/admin/prompt-injection", json={"enabled": True}
+        )
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
+
+        entries = (await admin_client.get("/api/admin/audit-log")).json()["entries"]
+        entry = entries[0]
+        assert entry["action"] == "update_prompt_injection_config"
+        assert entry["resource_type"] == "prompt_injection"
+
+        revert_response = await admin_client.post(f"/api/admin/audit-log/{entry['id']}/revert")
+        assert revert_response.status_code == 200
+
+        after = (await admin_client.get("/api/admin/prompt-injection")).json()
+        assert after == before
+
+    @pytest.mark.asyncio
+    async def test_limit_query_param_is_respected(self, admin_client, scratch_keys_file):
+        for i in range(3):
+            await admin_client.post(
+                "/api/admin/keys",
+                json={"id": f"key-{i}", "allowed_models": ["local/gemma4-nvfp4"]},
+            )
+
+        response = await admin_client.get("/api/admin/audit-log?limit=2")
+        assert response.status_code == 200
+        assert len(response.json()["entries"]) == 2
+
+
+class TestLastAdminKeyGuard:
+    @pytest.mark.asyncio
+    async def test_deleting_last_admin_key_rejected(
+        self, admin_client, scratch_keys_file_single_admin
+    ):
+        response = await admin_client.delete("/api/admin/keys/scratch-admin")
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "cannot_remove_last_admin_key"
+
+    @pytest.mark.asyncio
+    async def test_demoting_last_admin_key_rejected(
+        self, admin_client, scratch_keys_file_single_admin
+    ):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-admin", json={"is_admin": False}
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "cannot_remove_last_admin_key"
+
+    @pytest.mark.asyncio
+    async def test_deleting_one_of_two_admin_keys_succeeds(
+        self, admin_client, scratch_keys_file_two_admins
+    ):
+        response = await admin_client.delete("/api/admin/keys/scratch-admin")
+        assert response.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_demoting_one_of_two_admin_keys_succeeds(
+        self, admin_client, scratch_keys_file_two_admins
+    ):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-admin", json={"is_admin": False}
+        )
+        assert response.status_code == 200
+        assert response.json()["is_admin"] is False
+
+    @pytest.mark.asyncio
+    async def test_removing_keys_write_scope_from_last_scoped_key_rejected(
+        self, admin_client, tmp_path, monkeypatch
+    ):
+        # The guard isn't specific to is_admin -- a key that has keys:write
+        # only via admin_scopes is protected the same way.
+        key_hash = hashlib.sha256(b"sk-scoped-admin").hexdigest()
+        path = tmp_path / "api_keys.yaml"
+        path.write_text(
+            f"""
+keys:
+  - id: scoped-admin
+    key_hash: {key_hash}
+    allowed_models: [local/gemma4-nvfp4]
+    admin_scopes: [keys:write]
+"""
+        )
+        monkeypatch.delenv(CONFIG_YAML_ENV_VAR, raising=False)
+        monkeypatch.setenv(CONFIG_PATH_ENV_VAR, str(path))
+        real_get_key_store.cache_clear()
+        try:
+            response = await admin_client.patch(
+                "/api/admin/keys/scoped-admin", json={"admin_scopes": []}
+            )
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "cannot_remove_last_admin_key"
+        finally:
+            real_get_key_store.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_field_update_on_sole_non_admin_key_still_works(
+        self, admin_client, scratch_keys_file
+    ):
+        # Regression test: scratch_keys_file's one key was never an admin
+        # at all -- updating an unrelated field must not be blocked just
+        # because it happens to be the only key in the store.
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"requests_per_minute": 42}
+        )
+        assert response.status_code == 200
+        assert response.json()["requests_per_minute"] == 42
+
+    @pytest.mark.asyncio
+    async def test_deleting_sole_non_admin_key_still_works(self, admin_client, scratch_keys_file):
+        response = await admin_client.delete("/api/admin/keys/scratch-key")
+        assert response.status_code == 204

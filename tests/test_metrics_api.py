@@ -28,6 +28,14 @@ async def test_non_admin_rejected(client):
 
 
 @pytest.mark.asyncio
+async def test_scoped_metrics_read_key_is_allowed(observer_client):
+    # A key with just the "metrics:read" admin scope (not is_admin) can
+    # scrape /metrics -- see the observer_client fixture in conftest.py.
+    response = await observer_client.get("/metrics")
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_admin_gets_prometheus_text(admin_client):
     response = await admin_client.get("/metrics")
     assert response.status_code == 200

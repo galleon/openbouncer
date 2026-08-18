@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -6,6 +7,9 @@ from functools import lru_cache
 from typing import Protocol
 
 import redis.asyncio as redis_asyncio
+from redis.exceptions import RedisError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WINDOW_SECONDS = 60.0
 REDIS_URL_ENV_VAR = "REDIS_URL"
@@ -75,9 +79,19 @@ class RedisRateLimiter:
 
     async def check(self, key_id: str, limit: int) -> bool:
         redis_key = f"{REDIS_KEY_PREFIX}{key_id}"
-        count = await self._client.incr(redis_key)
-        if count == 1:
-            await self._client.expire(redis_key, self._window_seconds)
+        try:
+            count = await self._client.incr(redis_key)
+            if count == 1:
+                await self._client.expire(redis_key, self._window_seconds)
+        except RedisError as exc:
+            # Fail open: this runs on every authenticated request (see
+            # require_api_key), so an unreachable/erroring Redis must not
+            # turn every request into a 500. Rate limiting is a
+            # best-effort abuse guard, not a security boundary -- trading
+            # strict enforcement for availability during a Redis outage is
+            # a deliberate choice here, not an oversight.
+            logger.warning("Redis rate limiter unavailable, failing open: %s", exc)
+            return True
         return count <= limit
 
 

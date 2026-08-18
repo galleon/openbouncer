@@ -210,3 +210,56 @@ class TestStreaming:
             )
         assert exc_info.value.status_code == 404
         assert exc_info.value.code == "guardrails_config_not_found"
+
+
+class TestStreamingUsageEstimate:
+    """nemoguardrails exposes no real per-token usage through either
+    generate_async() or stream_async() -- usage_holder is filled in with a
+    word-count estimate instead (same heuristic
+    _bot_message_to_chat_completion already uses for the non-streaming
+    path). See NemoLibraryGuardrailsService._stream_response."""
+
+    @pytest.mark.asyncio
+    async def test_true_streaming_records_word_count_estimate(self):
+        service = _service(responses=["Hello there friend"])
+        usage_holder: dict[str, int] = {}
+        agen = await service.stream_chat_completion(
+            _request(config_id="no_rails", stream=True), usage_holder=usage_holder
+        )
+        [_ async for _ in agen]
+
+        assert usage_holder["prompt_tokens"] == 1  # "hi"
+        assert usage_holder["completion_tokens"] == 3  # "Hello there friend"
+        assert usage_holder["total_tokens"] == 4
+
+    @pytest.mark.asyncio
+    async def test_buffered_output_rails_records_word_count_estimate(self):
+        service = _service(responses=["Hello there!", "No"])
+        usage_holder: dict[str, int] = {}
+        agen = await service.stream_chat_completion(
+            _request(config_id="self_check_output", stream=True), usage_holder=usage_holder
+        )
+        [_ async for _ in agen]
+
+        assert usage_holder["completion_tokens"] == 2  # "Hello there!"
+        assert usage_holder["total_tokens"] == usage_holder["prompt_tokens"] + 2
+
+    @pytest.mark.asyncio
+    async def test_no_usage_holder_is_a_no_op(self):
+        # Default usage_holder=None -- must not raise.
+        service = _service(responses=["Hello there friend"])
+        agen = await service.stream_chat_completion(_request(config_id="no_rails", stream=True))
+        [_ async for _ in agen]
+
+    @pytest.mark.asyncio
+    async def test_interrupted_stream_leaves_usage_holder_untouched(self):
+        service = _service(llm_exception=RuntimeError("upstream is down"))
+        usage_holder: dict[str, int] = {}
+        agen = await service.stream_chat_completion(
+            _request(config_id="no_rails", stream=True), usage_holder=usage_holder
+        )
+        [_ async for _ in agen]
+
+        # The error-frame path never produced a real completion -- no
+        # fabricated success-shaped usage numbers.
+        assert usage_holder == {}

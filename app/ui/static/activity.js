@@ -155,17 +155,20 @@ async function refreshAccess() {
     return;
   }
 
-  // Same pattern as admin.js: check whoami first so a non-admin key gets a
-  // clean denied message instead of a broken/empty dashboard.
+  // Same pattern as admin.js: check whoami first so a key without the
+  // "activity:read" admin scope gets a clean denied message instead of a
+  // broken/empty dashboard. whoami's admin_scopes is already the
+  // *effective* set (every scope when is_admin is true), so a full admin
+  // key satisfies this the same way a scoped observer key does.
   const { response, body } = await apiFetch("/api/ui/whoami");
   if (!response.ok) {
     setStatusText(activityStatusEl, "Invalid API key.", true);
     return;
   }
-  if (!body.is_admin) {
+  if (!(body.admin_scopes || []).includes("activity:read")) {
     setStatusText(
       activityStatusEl,
-      `Access denied: key "${body.key_id}" does not have admin access.`,
+      `Access denied: key "${body.key_id}" does not have the "activity:read" admin scope.`,
       true,
     );
     return;

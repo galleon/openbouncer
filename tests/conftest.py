@@ -69,6 +69,17 @@ keys:
     requests_per_minute: 1000000
 """
 
+OBSERVER_KEY = "sk-observer-abcdefabcdefabcdefabcdef"
+OBSERVER_KEY_HASH = hashlib.sha256(OBSERVER_KEY.encode()).hexdigest()
+OBSERVER_STORE_YAML = f"""
+keys:
+  - id: observer-key
+    key_hash: {OBSERVER_KEY_HASH}
+    allowed_models: [local/gemma4-nvfp4]
+    admin_scopes: [metrics:read, activity:read]
+    requests_per_minute: 1000000
+"""
+
 GUARDRAILS_KEY = "sk-guardrails-abcdefabcdefabcdefabcdef"
 GUARDRAILS_KEY_HASH = hashlib.sha256(GUARDRAILS_KEY.encode()).hexdigest()
 GUARDRAILS_KEY_STORE_YAML = f"""
@@ -79,6 +90,16 @@ keys:
     allowed_guardrails_configs: [no_rails]
     requests_per_minute: 1000000
 """
+
+
+@pytest.fixture(autouse=True)
+def _isolated_audit_log(tmp_path, monkeypatch):
+    """Every admin write goes through app.core.audit.record_entry, which
+    appends to OPENBOUNCER_AUDIT_LOG_PATH (the bundled config/audit_log.jsonl
+    by default) -- redirect it to a per-test scratch path so the suite never
+    writes into the real repo file. Autouse + function-scoped tmp_path so
+    every test gets an isolated log with no cross-test leakage."""
+    monkeypatch.setenv("OPENBOUNCER_AUDIT_LOG_PATH", str(tmp_path / "audit_log.jsonl"))
 
 
 @pytest.fixture
@@ -144,6 +165,27 @@ async def admin_client():
             transport=transport,
             base_url="http://test",
             headers={"Authorization": f"Bearer {ADMIN_API_KEY}"},
+        ) as ac:
+            yield ac
+    finally:
+        app.dependency_overrides.pop(get_key_store, None)
+
+
+@pytest.fixture
+async def observer_client():
+    """A non-admin key scoped to metrics:read + activity:read only -- e.g.
+    an SRE who should see dashboards but must not be able to mint/delete
+    keys or rewrite guardrails/prompt-injection policy. Proves the
+    admin_scopes mechanism actually separates those capabilities instead of
+    the old all-or-nothing is_admin gate."""
+    store = parse_key_store(OBSERVER_STORE_YAML)
+    app.dependency_overrides[get_key_store] = lambda: store
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {OBSERVER_KEY}"},
         ) as ac:
             yield ac
     finally:

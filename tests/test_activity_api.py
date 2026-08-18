@@ -93,6 +93,16 @@ async def test_non_admin_rejected(client, prometheus_configured):
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_scoped_activity_read_key_is_allowed(observer_client, prometheus_configured):
+    # A key with just the "activity:read" admin scope (not is_admin) can
+    # read the dashboard -- see the observer_client fixture in conftest.py.
+    respx.get(url__startswith=PROM_BASE_URL).mock(side_effect=_prometheus_side_effect)
+    response = await observer_client.get("/api/admin/activity/overview")
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_unconfigured_returns_503(admin_client, prometheus_unconfigured):
     response = await admin_client.get("/api/admin/activity/overview")
     assert response.status_code == 503

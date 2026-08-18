@@ -21,7 +21,9 @@ async def whoami(auth: AuthContext = Depends(require_api_key)) -> WhoAmIResponse
     # key can call this, so the admin UI can distinguish "not admin" from
     # "auth failed" and render a clean denied-state rather than a page full
     # of broken 403s from every /api/admin/* call.
-    return WhoAmIResponse(key_id=auth.key_id, is_admin=auth.is_admin)
+    return WhoAmIResponse(
+        key_id=auth.key_id, is_admin=auth.is_admin, admin_scopes=sorted(auth.admin_scopes)
+    )
 
 
 @router.get("/api/ui/models", response_model=UIModelsResponse)

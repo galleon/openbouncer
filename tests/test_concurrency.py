@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.auth.keys import get_key_store, parse_key_store
 from app.core.registry import ModelConcurrencyLimiter, get_model_registry, parse_model_registry
+from app.guardrails.service import GuardrailsService, get_guardrails_service
 from app.main import app
 from app.upstream.client import get_upstream_client
 
@@ -43,7 +44,43 @@ class _ControllableUpstreamClient:
         self.release_event = asyncio.Event()
         self.reached_block = asyncio.Event()
 
-    async def stream_chat_completion(self, *, base_url, api_key, upstream_model, request):
+    async def stream_chat_completion(
+        self, *, base_url, api_key, upstream_model, request, usage_holder=None
+    ):
+        self.active += 1
+        self.max_active_seen = max(self.max_active_seen, self.active)
+        try:
+            yield 'data: {"id":"c1","object":"chat.completion.chunk","choices":[]}\n\n'
+            self.reached_block.set()
+            await self.release_event.wait()
+            yield "data: [DONE]\n\n"
+        finally:
+            self.active -= 1
+
+
+class _ControllableGuardrailsService(GuardrailsService):
+    """Fake GuardrailsService whose stream_chat_completion holds each call
+    open until release_event is set, same shape as
+    _ControllableUpstreamClient above -- used to prove a guardrails-routed
+    request is still bound by the target model's concurrency limiter even
+    though it never touches UpstreamClient (see app/api/routes/chat.py's
+    streaming guardrails branch)."""
+
+    def __init__(self):
+        self.active = 0
+        self.max_active_seen = 0
+        self.release_event = asyncio.Event()
+        self.reached_block = asyncio.Event()
+
+    async def process_chat_completion(self, request):
+        raise NotImplementedError
+
+    async def stream_chat_completion(self, request, *, usage_holder=None):
+        if request.guardrails is None or not request.guardrails.enabled:
+            return None
+        return self._stream()
+
+    async def _stream(self):
         self.active += 1
         self.max_active_seen = max(self.max_active_seen, self.active)
         try:
@@ -166,5 +203,71 @@ async def test_streaming_chat_route_enforces_concurrency_limit(concurrency_clien
     assert response1.status_code == 200
     assert response2.status_code == 200
     assert fake_upstream.max_active_seen == 1
+    assert limiter.in_flight == 0
+    assert limiter.queued == 0
+
+
+@pytest.fixture
+async def guardrails_concurrency_client(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_TEST_API_KEY", "test-key")
+    registry = parse_model_registry(LIMITED_REGISTRY_YAML)
+    key_store = parse_key_store(CONCURRENCY_KEY_STORE_YAML)
+    fake_guardrails = _ControllableGuardrailsService()
+
+    app.dependency_overrides[get_model_registry] = lambda: registry
+    app.dependency_overrides[get_key_store] = lambda: key_store
+    app.dependency_overrides[get_guardrails_service] = lambda: fake_guardrails
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {CONCURRENCY_KEY}"},
+        ) as ac:
+            yield ac, fake_guardrails, registry
+    finally:
+        app.dependency_overrides.pop(get_model_registry, None)
+        app.dependency_overrides.pop(get_key_store, None)
+        app.dependency_overrides.pop(get_guardrails_service, None)
+
+
+@pytest.mark.asyncio
+async def test_streaming_guardrails_routed_chat_shares_the_same_model_limiter(
+    guardrails_concurrency_client,
+):
+    """A guardrails-routed request never touches UpstreamClient (see
+    NemoLibraryGuardrailsService), but app/api/routes/chat.py still
+    acquires the target model's own ModelConcurrencyLimiter around it, so
+    it shares one concurrency budget with direct-upstream requests to that
+    same model."""
+    client, fake_guardrails, registry = guardrails_concurrency_client
+    body = {
+        "model": "test/limited",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "guardrails": {"config_id": "whatever", "enabled": True},
+    }
+
+    task1 = asyncio.create_task(client.post("/v1/chat/completions", json=body))
+    task2 = asyncio.create_task(client.post("/v1/chat/completions", json=body))
+
+    await asyncio.wait_for(fake_guardrails.reached_block.wait(), timeout=1)
+    assert fake_guardrails.max_active_seen == 1
+
+    limiter = registry.get_concurrency_limiter("test/limited")
+    assert limiter.in_flight == 1
+    for _ in range(1000):
+        if limiter.queued == 1:
+            break
+        await asyncio.sleep(0)
+    assert limiter.queued == 1
+
+    fake_guardrails.release_event.set()
+    response1 = await task1
+    response2 = await task2
+
+    assert response1.status_code == 200
+    assert response2.status_code == 200
+    assert fake_guardrails.max_active_seen == 1
     assert limiter.in_flight == 0
     assert limiter.queued == 0

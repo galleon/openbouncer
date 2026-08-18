@@ -103,6 +103,7 @@ class UpstreamClient:
         api_key: str,
         upstream_model: str,
         request: ChatCompletionRequest,
+        usage_holder: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         """Yields SSE `data: ...\\n\\n` frames, always ending with `data: [DONE]\\n\\n`.
 
@@ -114,10 +115,25 @@ class UpstreamClient:
         (the client already committed to a 200 text/event-stream response),
         so they are instead emitted as an in-band SSE error frame followed by
         the terminal [DONE] frame.
+
+        If `usage_holder` is given, it's filled in with prompt_tokens/
+        completion_tokens/total_tokens from upstream's final usage chunk
+        (OpenAI's `stream_options.include_usage`), which this method always
+        requests from upstream *regardless* of what the caller of this
+        gateway asked for -- so callers can capture real usage for their own
+        accounting (see app/api/routes/chat.py) even when the calling
+        client didn't opt in. That extra chunk is only relayed onward to the
+        caller if `request.stream_options.include_usage` was actually set,
+        matching what a client library expects to receive; otherwise it's
+        captured into `usage_holder` and swallowed. Not every upstream
+        honors `stream_options` -- `usage_holder` just stays empty in that
+        case, same as if this parameter were never passed.
         """
         payload = request.model_dump(mode="json", exclude_none=True, exclude={"guardrails"})
         payload["model"] = upstream_model
         payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        relay_usage_chunk = bool(request.stream_options and request.stream_options.include_usage)
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
@@ -145,10 +161,26 @@ class UpstreamClient:
                             yield "data: [DONE]\n\n"
                             return
                         try:
-                            json.loads(data)
+                            parsed = json.loads(data)
                         except ValueError:
                             logger.warning("Skipping malformed upstream SSE data frame")
                             continue
+
+                        usage = parsed.get("usage") if isinstance(parsed, dict) else None
+                        if isinstance(usage, dict) and parsed.get("choices") == []:
+                            # The stream_options.include_usage final chunk --
+                            # captured for our own accounting regardless of
+                            # relay_usage_chunk, since we always requested it
+                            # above (see this method's docstring).
+                            if usage_holder is not None:
+                                usage_holder["prompt_tokens"] = usage.get("prompt_tokens", 0)
+                                usage_holder["completion_tokens"] = usage.get(
+                                    "completion_tokens", 0
+                                )
+                                usage_holder["total_tokens"] = usage.get("total_tokens", 0)
+                            if not relay_usage_chunk:
+                                continue
+
                         yield f"data: {data}\n\n"
                 except Exception as exc:
                     logger.warning("Upstream stream interrupted after start: %s", exc)

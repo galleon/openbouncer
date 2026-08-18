@@ -1,4 +1,5 @@
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.auth.rate_limiter import (
     REDIS_URL_ENV_VAR,
@@ -125,6 +126,37 @@ class TestRedisRateLimiter:
             await limiter.check("key-a", limit=3)
         assert await limiter.check("key-a", limit=3) is False
         assert await limiter.check("key-b", limit=3) is True
+
+
+class _BrokenRedisClient:
+    """Stands in for a Redis client that can't reach the server at all --
+    every call raises, same as a real redis.asyncio.Redis would on a
+    connection failure."""
+
+    async def incr(self, key: str) -> int:
+        raise RedisConnectionError("connection refused")
+
+    async def expire(self, key: str, seconds: int) -> None:
+        raise RedisConnectionError("connection refused")
+
+
+class TestRedisRateLimiterFailsOpen:
+    @pytest.mark.asyncio
+    async def test_check_returns_true_when_redis_unreachable(self):
+        limiter = RedisRateLimiter(_BrokenRedisClient(), window_seconds=60.0)
+        # Fails open: an unreachable Redis must not turn every
+        # authenticated request into a 500 (see require_api_key, which
+        # calls this on every request) -- rate limiting is a best-effort
+        # abuse guard, not a security boundary.
+        assert await limiter.check("key-a", limit=1) is True
+
+    @pytest.mark.asyncio
+    async def test_check_does_not_raise_even_when_over_limit(self):
+        # Can't actually enforce `limit` without Redis, but the important
+        # guarantee is that this never raises.
+        limiter = RedisRateLimiter(_BrokenRedisClient(), window_seconds=60.0)
+        for _ in range(5):
+            assert await limiter.check("key-a", limit=1) is True
 
 
 class TestBuildRateLimiter:

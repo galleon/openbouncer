@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from app.auth.dependency import AuthContext, ensure_model_allowed, require_api_key
-from app.auth.usage import UsageTracker, get_usage_tracker
+from app.auth.usage import SupportsUsageTracking, get_usage_tracker
 from app.core.errors import OpenAIError
 from app.core.registry import ModelRegistry, get_model_registry, resolve_api_key
 from app.core.request_context import get_request_id
@@ -27,7 +27,7 @@ async def create_embeddings(
     registry: ModelRegistry = Depends(get_model_registry),
     upstream_client: UpstreamClient = Depends(get_upstream_client),
     auth: AuthContext = Depends(require_api_key),
-    usage_tracker: UsageTracker = Depends(get_usage_tracker),
+    usage_tracker: SupportsUsageTracking = Depends(get_usage_tracker),
 ) -> EmbeddingResponse:
     entry = registry.get(request.model)
     if entry is None:
