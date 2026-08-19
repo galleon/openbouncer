@@ -27,7 +27,7 @@ Extends OpenRouter's fixed built-in set in two ways:
 
 Redaction uses a category-specific placeholder (`[EMAIL]`, `[SSN]`, ...)
 rather than one generic token, again matching OpenRouter's documented
-behavior -- see _redaction_token().
+behavior -- see redaction_token().
 """
 
 import asyncio
@@ -181,7 +181,7 @@ _REDACTION_TOKENS: dict[OutputLeakCategory, str] = {
 }
 
 
-def _redaction_token(match: CategoryMatch) -> str:
+def redaction_token(match: CategoryMatch) -> str:
     if match.category is OutputLeakCategory.CUSTOM:
         # Admin-chosen, human-readable label for their own pattern, e.g. a
         # custom_patterns entry named "project_codename" redacts to
@@ -272,7 +272,7 @@ def resolve_overall_action(matches: list[CategoryMatch]) -> OutputLeakAction:
 
 
 def _merge_spans_with_tokens(matches: list[CategoryMatch]) -> list[tuple[tuple[int, int], str]]:
-    ordered = sorted(((m.span, _redaction_token(m)) for m in matches), key=lambda st: st[0])
+    ordered = sorted(((m.span, redaction_token(m)) for m in matches), key=lambda st: st[0])
     merged: list[tuple[tuple[int, int], str]] = []
     for span, token in ordered:
         if merged and span[0] <= merged[-1][0][1]:

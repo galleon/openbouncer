@@ -258,7 +258,7 @@ must not be able to mint/delete keys or rewrite guardrails policy -- set
 | `prompt_injection:write` | `/api/admin/prompt-injection*`: read/edit/test the prompt-injection config. |
 | `output_leak:write` | `/api/admin/output-leak*`: read/edit/test the [output-leak guardrail](#output-leak-guardrail) config. |
 | `metrics:read` | `GET /metrics`. |
-| `activity:read` | `GET /api/admin/activity/overview`. |
+| `activity:read` | `GET /api/admin/activity/overview` and `GET /api/admin/guardrail-events`. |
 
 `admin_scopes` is ignored (every scope is implied) on a key with
 `is_admin: true`; it only matters for a key that isn't a full admin. Create
@@ -319,6 +319,7 @@ satisfies all of them):
 | PATCH | `/api/admin/output-leak` | `output_leak:write` | Partially update the above -- `categories` is a partial map (merged against the on-disk value, same as prompt-injection's); `custom_patterns`, if given, fully replaces the list. Persists to `config/output_leak.yaml` and invalidates the in-process cache, live on the very next request. |
 | POST | `/api/admin/output-leak/test` | `output_leak:write` | Scan sample `text` against the *currently saved* config (works even while `enabled: false`, and never persists anything) -- returns the resolved action, every matching pattern, and a redacted preview when the action is `redact`. |
 | GET | `/api/admin/activity/overview` | `activity:read` | Prometheus-backed traffic/usage summary for the [Observability](#observability) dashboard. |
+| GET | `/api/admin/guardrail-events` | `activity:read` | Filterable list of individual prompt-injection/output-leak decisions -- see [Guardrail decision log](#guardrail-decision-log). |
 | GET | `/metrics` | `metrics:read` | Prometheus exposition format -- see [Metrics](#metrics). |
 | GET | `/api/admin/audit-log` | full `is_admin: true` | List recent admin writes, most recent first (`?limit=`, default 50, max 200) -- see [Audit log & revert](#audit-log--revert). |
 | POST | `/api/admin/audit-log/{entry_id}/revert` | full `is_admin: true` | Undo one entry: restores the exact file content from just before that write. |
@@ -480,6 +481,46 @@ mint/delete keys or rewrite guardrails/prompt-injection policy.
 - `openbouncer_usage_requests_total` / `openbouncer_usage_tokens_total`
   -- the existing per-key `UsageTracker` (see [Usage
   accounting](#usage-accounting)), exported as gauges.
+
+### Guardrail decision log
+
+The metrics above answer *how many* prompt-injection/output-leak matches
+happened; `GET /api/admin/guardrail-events` (gated by the `activity:read`
+[admin scope](#scoped-admin-access) -- same audience as the Activity
+dashboard, not a new dedicated scope) answers *which ones*: a filterable,
+most-recent-first list of individual guardrail decisions, each with
+`key_id`, `guardrail` (`prompt_injection` or `output_leak`), `model`,
+`category`, `pattern_name`, `action`, `via` (prompt-injection only), a
+`snippet`, and `request_id` -- enough to actually investigate a specific
+incident instead of only seeing an aggregate counter move. Query params:
+`limit` (default 50, max 200), and optional exact-match filters `key_id`,
+`guardrail`, `action`.
+
+Recorded by `app/core/guardrail_events.py` -- one entry per *match*, not
+per request (a request with three flagged categories gets three entries),
+and regardless of which action (`flag`/`redact`/`block`) actually applies,
+so a category left at the default `flag` still shows up here even though
+nothing about the request was changed. Same append-only-JSONL-with-a-
+retention-cap shape as the [admin audit log](#audit-log--revert)
+(`config/guardrail_events.jsonl`, gitignored, `OPENBOUNCER_GUARDRAIL_EVENTS_PATH`
+/ `OPENBOUNCER_GUARDRAIL_EVENTS_MAX_ENTRIES` env vars, default cap 20000)
+but a deliberately separate file and module: this logs per-request
+guardrail activity against *someone else's* traffic, not admin config
+writes, so it has no revert semantics and a higher expected write volume.
+
+**Snippet privacy**: `snippet` never contains a raw output-leak match (an
+actual email, SSN, API key, ...) -- it's always that category's own
+redaction placeholder (e.g. `[EMAIL]`), so this log can't become a second
+copy of the very data the output-leak guardrail exists to keep from
+leaking further. Prompt-injection snippets are the adversarial *input*
+phrase itself (e.g. "ignore all previous instructions") -- not PII, and
+exactly what a reviewer needs to tell a real attack from a false
+positive, so those are logged as-is.
+
+The Activity dashboard's "Guardrail events" table (`/ui/activity.html`)
+renders this endpoint with the same three filters, and -- unlike the rest
+of that page -- doesn't need `PROMETHEUS_URL` configured, since it reads
+this log directly rather than querying Prometheus.
 
 ### Structured logs
 

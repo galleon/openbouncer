@@ -25,6 +25,7 @@ from app.core.metrics import (
     PROMPT_INJECTION_MATCHES_TOTAL,
     PROMPT_INJECTION_SCANNED_TOTAL,
 )
+from app.core.guardrail_events import record_event as record_guardrail_event
 from app.core.registry import ModelConcurrencyLimiter, ModelRegistry, get_model_registry, resolve_api_key
 from app.core.request_context import get_request_id
 from app.guardrails.output_leak import (
@@ -34,6 +35,7 @@ from app.guardrails.output_leak import (
     extract_stream_delta_text,
     get_output_leak_config,
     redact_text as redact_output_leak_text,
+    redaction_token as output_leak_redaction_token,
     requires_buffering as output_leak_requires_buffering,
     resolve_overall_action as resolve_output_leak_action,
     scan_response as scan_output_leak_response,
@@ -98,56 +100,62 @@ def _apply_output_leak_guardrail(
         return response
 
     response, action, matches = apply_output_leak_action(response, results)
-    OUTPUT_LEAK_ACTIONS_TOTAL.labels(action=action.value).inc()
-    for match in matches:
-        OUTPUT_LEAK_MATCHES_TOTAL.labels(category=match.category.value).inc()
+    _record_output_leak_matches(matches, key_id=key_id, model=response.model, action=action, streaming=False)
 
-    categories = sorted({m.category.value for m in matches})
     if action is OutputLeakAction.BLOCK:
-        logger.warning(
-            "output leak blocked key_id=%s model=%s categories=%s request_id=%s",
-            key_id,
-            response.model,
-            categories,
-            get_request_id(),
-        )
         raise OpenAIError(
             "The model's response was blocked by the output sensitive-information guardrail.",
             status_code=403,
             error_type="permission_error",
             code="output_leak_detected",
         )
-    if action is OutputLeakAction.FLAG:
-        logger.info(
-            "output leak flagged key_id=%s model=%s categories=%s request_id=%s",
-            key_id,
-            response.model,
-            categories,
-            get_request_id(),
-        )
     # REDACT: `response` above is already the rewritten copy from
-    # apply_output_leak_action() -- nothing further to do.
+    # apply_output_leak_action() -- nothing further to do. FLAG: no
+    # mutation, already logged/recorded above.
     return response
 
 
-def _log_and_meter_output_leak_matches(
-    matches: list, *, key_id: str, model: str, blocked: bool = False, redacted: bool = False
+def _record_output_leak_matches(
+    matches: list, *, key_id: str, model: str, action: OutputLeakAction, streaming: bool
 ) -> None:
+    """Shared by both the non-streaming (_apply_output_leak_guardrail) and
+    streaming (_with_output_leak_scan) call sites: increments metrics,
+    logs, and records one app.core.guardrail_events entry per match --
+    regardless of which action ends up being applied to the response as a
+    whole, so a category that only individually resolves to `flag` still
+    gets its own event even when a *different* match drove the request
+    toward an overall `block`/`redact`.
+    """
     if not matches:
         return
-    action = resolve_output_leak_action(matches)
     OUTPUT_LEAK_ACTIONS_TOTAL.labels(action=action.value).inc()
+    request_id = get_request_id()
     for match in matches:
         OUTPUT_LEAK_MATCHES_TOTAL.labels(category=match.category.value).inc()
-    verb = "blocked" if blocked else "redacted" if redacted else "flagged"
-    log = logger.warning if blocked else logger.info
+        record_guardrail_event(
+            request_id=request_id,
+            key_id=key_id,
+            guardrail="output_leak",
+            model=model,
+            category=match.category.value,
+            pattern_name=match.pattern_name,
+            action=match.action.value,
+            via=None,
+            # Never the raw matched PII/secret -- the category's own
+            # redaction placeholder instead (see app.core.guardrail_events'
+            # module docstring's "Snippet privacy" paragraph).
+            snippet=output_leak_redaction_token(match),
+        )
+    verb = "blocked" if action is OutputLeakAction.BLOCK else "redacted" if action is OutputLeakAction.REDACT else "flagged"
+    log = logger.warning if action is OutputLeakAction.BLOCK else logger.info
     log(
-        "output leak %s (stream) key_id=%s model=%s categories=%s request_id=%s",
+        "output leak %s%s key_id=%s model=%s categories=%s request_id=%s",
         verb,
+        " (stream)" if streaming else "",
         key_id,
         model,
         sorted({m.category.value for m in matches}),
-        get_request_id(),
+        request_id,
     )
 
 
@@ -186,7 +194,9 @@ async def _with_output_leak_scan(
             accumulated.append(extract_stream_delta_text(chunk))
             yield chunk
         matches = scan_output_leak_text("".join(accumulated), ol_config)
-        _log_and_meter_output_leak_matches(matches, key_id=key_id, model=model)
+        _record_output_leak_matches(
+            matches, key_id=key_id, model=model, action=resolve_output_leak_action(matches), streaming=True
+        )
         return
 
     buffered: list[str] = []
@@ -197,7 +207,7 @@ async def _with_output_leak_scan(
     action = resolve_output_leak_action(matches)
 
     if action is OutputLeakAction.BLOCK:
-        _log_and_meter_output_leak_matches(matches, key_id=key_id, model=model, blocked=True)
+        _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
         yield format_sse_error(
             OpenAIError(
                 "The model's response was blocked by the output sensitive-information guardrail.",
@@ -210,7 +220,7 @@ async def _with_output_leak_scan(
         return
 
     if action is OutputLeakAction.REDACT:
-        _log_and_meter_output_leak_matches(matches, key_id=key_id, model=model, redacted=True)
+        _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
         redacted_text = redact_output_leak_text(text, matches)
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
@@ -220,7 +230,7 @@ async def _with_output_leak_scan(
         return
 
     # FLAG or no match: relay the buffered original chunks unmodified.
-    _log_and_meter_output_leak_matches(matches, key_id=key_id, model=model)
+    _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
     for chunk in buffered:
         yield chunk
 
@@ -316,8 +326,28 @@ async def create_chat_completion(
             if pi_results:
                 request, pi_action, pi_matches = apply_action(request, pi_results)
                 PROMPT_INJECTION_ACTIONS_TOTAL.labels(action=pi_action.value).inc()
+                pi_request_id = get_request_id()
                 for match in pi_matches:
                     PROMPT_INJECTION_MATCHES_TOTAL.labels(category=match.category.value, via=match.via).inc()
+                    record_guardrail_event(
+                        request_id=pi_request_id,
+                        key_id=auth.key_id,
+                        guardrail="prompt_injection",
+                        model=request.model,
+                        category=match.category.value,
+                        pattern_name=match.pattern_name,
+                        # Each match's *own* configured action, not the
+                        # overall (most-restrictive-wins) pi_action -- lets
+                        # a reviewer see exactly what this category was set
+                        # to, even when a different match drove the actual
+                        # decision applied to the request.
+                        action=pi_config.categories.get(match.category, InjectionAction.FLAG).value,
+                        via=match.via,
+                        # Prompt-injection matches are the adversarial input
+                        # phrase itself, not PII -- safe to log as-is (see
+                        # app.core.guardrail_events' module docstring).
+                        snippet=match.matched_text,
+                    )
                 if pi_action is InjectionAction.BLOCK:
                     logger.warning(
                         "prompt injection blocked key_id=%s model=%s categories=%s request_id=%s",

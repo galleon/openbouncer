@@ -102,6 +102,15 @@ def _isolated_audit_log(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENBOUNCER_AUDIT_LOG_PATH", str(tmp_path / "audit_log.jsonl"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_guardrail_events(tmp_path, monkeypatch):
+    """Same reasoning as _isolated_audit_log above, for
+    app.core.guardrail_events (the per-request guardrail decision log) --
+    redirects it to a per-test scratch path so the suite never writes into
+    the real repo file."""
+    monkeypatch.setenv("OPENBOUNCER_GUARDRAIL_EVENTS_PATH", str(tmp_path / "guardrail_events.jsonl"))
+
+
 @pytest.fixture
 async def client():
     transport = ASGITransport(app=app)

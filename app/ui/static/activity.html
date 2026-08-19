@@ -40,6 +40,46 @@
             <div id="top-models-list"></div>
           </div>
         </div>
+
+      </section>
+
+      <section id="guardrail-events-section" hidden>
+        <div class="admin-section">
+          <h2>Guardrail events</h2>
+          <p class="admin-hint">
+            Every individual prompt-injection or output-leak match, most
+            recent first -- the per-decision counterpart to the aggregate
+            counts above. Unlike the rest of this page, this table doesn't
+            need Prometheus configured (it reads the local guardrail event
+            log directly). See the README's "Prompt injection detection"
+            and "Output-leak guardrail" sections.
+          </p>
+          <div class="row">
+            <label class="field">
+              <span>Key id</span>
+              <input type="text" id="ge-filter-key" placeholder="(any)" />
+            </label>
+            <label class="field">
+              <span>Guardrail</span>
+              <select id="ge-filter-guardrail">
+                <option value="">(any)</option>
+                <option value="prompt_injection">Prompt injection</option>
+                <option value="output_leak">Output leak</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Action</span>
+              <select id="ge-filter-action">
+                <option value="">(any)</option>
+                <option value="flag">Flag</option>
+                <option value="redact">Redact</option>
+                <option value="block">Block</option>
+              </select>
+            </label>
+            <button type="button" id="ge-filter-apply">Filter</button>
+          </div>
+          <div id="guardrail-events-table"></div>
+        </div>
       </section>
     </main>
 

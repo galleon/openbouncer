@@ -188,6 +188,27 @@ class OutputLeakTestResponse(BaseModel):
     redacted_preview: str | None
 
 
+class GuardrailEventItem(BaseModel):
+    id: str
+    timestamp: str
+    request_id: str | None
+    key_id: str
+    # "prompt_injection" | "output_leak".
+    guardrail: str
+    model: str
+    category: str
+    pattern_name: str
+    action: str
+    # Only meaningful for guardrail="prompt_injection"; None for
+    # "output_leak" (see app.core.guardrail_events.GuardrailEvent).
+    via: str | None
+    snippet: str
+
+
+class GuardrailEventsResponse(BaseModel):
+    events: list[GuardrailEventItem]
+
+
 class AdminAuditEntryItem(BaseModel):
     id: str
     timestamp: str

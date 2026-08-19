@@ -27,6 +27,7 @@ from app.auth.keys import (
 from app.core.audit import list_entries as list_audit_entries
 from app.core.audit import revert_entry as revert_audit_entry_by_id
 from app.core.errors import OpenAIError
+from app.core.guardrail_events import list_events as list_guardrail_events
 from app.core.request_context import get_request_id
 from app.guardrails.catalog import GuardrailsCatalogService, get_guardrails_catalog_service
 from app.guardrails.editable_config import (
@@ -68,6 +69,8 @@ from app.schemas.admin import (
     AdminKeyListResponse,
     CreateKeyRequest,
     CreateKeyResponse,
+    GuardrailEventItem,
+    GuardrailEventsResponse,
     OutputLeakConfigResponse,
     OutputLeakCustomPatternItem,
     OutputLeakTestMatch,
@@ -688,6 +691,43 @@ async def test_output_leak_config(
             for m in matches
         ],
         redacted_preview=redacted_preview,
+    )
+
+
+def _to_guardrail_event_item(event) -> GuardrailEventItem:
+    return GuardrailEventItem(
+        id=event.id,
+        timestamp=event.timestamp,
+        request_id=event.request_id,
+        key_id=event.key_id,
+        guardrail=event.guardrail,
+        model=event.model,
+        category=event.category,
+        pattern_name=event.pattern_name,
+        action=event.action,
+        via=event.via,
+        snippet=event.snippet,
+    )
+
+
+@router.get("/api/admin/guardrail-events", response_model=GuardrailEventsResponse)
+async def list_guardrail_events_endpoint(
+    limit: int = Query(50, ge=1, le=200),
+    key_id: str | None = None,
+    guardrail: str | None = Query(None, pattern="^(prompt_injection|output_leak)$"),
+    action: str | None = Query(None, pattern="^(flag|redact|block)$"),
+    auth: AuthContext = Depends(require_scope("activity:read")),
+) -> GuardrailEventsResponse:
+    # Gated on activity:read (not a new dedicated scope, and not
+    # prompt_injection:write/output_leak:write) -- this is the per-request
+    # observability counterpart to GET /api/admin/activity/overview
+    # (same scope, same "surfaced in the Activity dashboard" audience),
+    # not a config-write capability like the other two guardrail scopes.
+    return GuardrailEventsResponse(
+        events=[
+            _to_guardrail_event_item(e)
+            for e in list_guardrail_events(limit=limit, key_id=key_id, guardrail=guardrail, action=action)
+        ]
     )
 
 

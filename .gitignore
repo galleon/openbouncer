@@ -12,6 +12,11 @@ __pycache__/
 # file snapshots, including key_hash values).
 /config/audit_log.jsonl
 
+# Per-request guardrail decision log (app/core/guardrail_events.py) -- a
+# runtime-generated file that can contain matched prompt-injection phrases,
+# same reasoning as audit_log.jsonl above.
+/config/guardrail_events.jsonl
+
 # docker-compose env overrides (REDIS_URL, HF_TOKEN, VLLM_IMAGE, etc.) -- local machine config, may hold secrets.
 /.env
 

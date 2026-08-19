@@ -11,6 +11,12 @@ const statCardsEl = document.getElementById("stat-cards");
 const requestsChartEl = document.getElementById("requests-chart");
 const topKeysListEl = document.getElementById("top-keys-list");
 const topModelsListEl = document.getElementById("top-models-list");
+const geFilterKeyInput = document.getElementById("ge-filter-key");
+const geFilterGuardrailSelect = document.getElementById("ge-filter-guardrail");
+const geFilterActionSelect = document.getElementById("ge-filter-action");
+const geFilterApplyButton = document.getElementById("ge-filter-apply");
+const guardrailEventsTableEl = document.getElementById("guardrail-events-table");
+const guardrailEventsSectionEl = document.getElementById("guardrail-events-section");
 
 function currentApiKey() {
   return apiKeyInput.value.trim();
@@ -106,6 +112,63 @@ function renderRequestsChart(requestsByModel) {
   });
 }
 
+function renderGuardrailEventsTable(events) {
+  guardrailEventsTableEl.innerHTML = "";
+  if (events.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "admin-hint";
+    empty.textContent = "No guardrail events match this filter yet.";
+    guardrailEventsTableEl.appendChild(empty);
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "admin-table";
+  const thead = document.createElement("thead");
+  thead.innerHTML =
+    "<tr><th>Time</th><th>Key</th><th>Guardrail</th><th>Model</th><th>Category</th><th>Action</th><th>Snippet</th></tr>";
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const event of events) {
+    const tr = document.createElement("tr");
+    for (const value of [
+      event.timestamp,
+      event.key_id,
+      event.guardrail,
+      event.model,
+      event.category,
+      event.action,
+      event.snippet,
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  const scrollWrapper = document.createElement("div");
+  scrollWrapper.className = "admin-table-scroll";
+  scrollWrapper.appendChild(table);
+  guardrailEventsTableEl.appendChild(scrollWrapper);
+}
+
+async function loadGuardrailEvents() {
+  const params = new URLSearchParams({ limit: "50" });
+  const keyId = geFilterKeyInput.value.trim();
+  if (keyId) params.set("key_id", keyId);
+  if (geFilterGuardrailSelect.value) params.set("guardrail", geFilterGuardrailSelect.value);
+  if (geFilterActionSelect.value) params.set("action", geFilterActionSelect.value);
+
+  const { response, body } = await apiFetch(`/api/admin/guardrail-events?${params.toString()}`);
+  if (!response.ok) return;
+  renderGuardrailEventsTable(body.events);
+}
+
+geFilterApplyButton.addEventListener("click", loadGuardrailEvents);
+
 async function loadActivity() {
   const range = rangeSelect.value;
   const { response, body } = await apiFetch(`/api/admin/activity/overview?range=${range}`);
@@ -148,6 +211,7 @@ async function loadActivity() {
 
 async function refreshAccess() {
   activityContentEl.hidden = true;
+  guardrailEventsSectionEl.hidden = true;
 
   const apiKey = currentApiKey();
   if (!apiKey) {
@@ -175,7 +239,12 @@ async function refreshAccess() {
   }
 
   setStatusText(activityStatusEl, "Loading...");
-  await loadActivity();
+  // Independent of loadActivity()'s Prometheus-backed data -- this table
+  // reads the local guardrail event log directly, so it loads (and stays
+  // visible) even when PROMETHEUS_URL isn't configured for this
+  // deployment and the rest of the page can't render.
+  guardrailEventsSectionEl.hidden = false;
+  await Promise.all([loadActivity(), loadGuardrailEvents()]);
 }
 
 apiKeyInput.addEventListener("change", () => {
