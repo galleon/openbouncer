@@ -17,13 +17,14 @@ Endpoints: `GET /healthz` (no auth), `GET /v1/models`, `POST /v1/chat/completion
 require a bearer API key -- see [Authentication](#authentication) below.
 
 `uv run pytest` above is the fast suite (no browser, no network beyond
-Redis/upstream mocks) and is what CI runs on every push. A separate,
-opt-in browser-based smoke suite (`tests/e2e/`) drives the three [Web
-UI](#web-ui) pages in a real headless browser via
-[Playwright](https://playwright.dev) -- it needs a downloaded browser
-binary, not just a Python package, so it's excluded from the default run
-(`pyproject.toml`'s `addopts`) rather than slowing down every `uv run
-pytest`:
+Redis/upstream mocks) -- excluded from it (via `pyproject.toml`'s
+`addopts`) is a separate browser-based smoke suite (`tests/e2e/`) that
+drives the three [Web UI](#web-ui) pages in a real headless browser via
+[Playwright](https://playwright.dev). Both run in CI on every push (see
+`.github/workflows/tests.yml`'s `test` and `e2e` jobs) but are kept as
+separate local commands, since the e2e suite needs a downloaded browser
+binary, not just a Python package, and would otherwise slow down every
+`uv run pytest` during normal development:
 
 ```bash
 uv sync --extra e2e
