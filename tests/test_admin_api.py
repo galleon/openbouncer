@@ -389,6 +389,45 @@ class TestCreateKey:
         assert body["is_admin"] is True
         assert body["allowed_guardrails_configs"] == []
 
+    @pytest.mark.asyncio
+    async def test_defaults_to_unlimited_token_budget(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={"id": "new-key", "allowed_models": ["local/gemma4-nvfp4"]},
+        )
+        assert response.status_code == 201
+        body = response.json()["key"]
+        assert body["token_budget_daily"] is None
+        assert body["token_budget_monthly"] is None
+
+    @pytest.mark.asyncio
+    async def test_token_budget_round_trips(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={
+                "id": "budgeted-key",
+                "allowed_models": ["local/gemma4-nvfp4"],
+                "token_budget_daily": 100_000,
+                "token_budget_monthly": 2_000_000,
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()["key"]
+        assert body["token_budget_daily"] == 100_000
+        assert body["token_budget_monthly"] == 2_000_000
+
+    @pytest.mark.asyncio
+    async def test_zero_token_budget_rejected(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={
+                "id": "bad-budget-key",
+                "allowed_models": ["local/gemma4-nvfp4"],
+                "token_budget_daily": 0,
+            },
+        )
+        assert response.status_code == 400
+
 
 class TestUpdateKey:
     @pytest.mark.asyncio
@@ -428,6 +467,41 @@ class TestUpdateKey:
         body = response.json()
         assert body["requests_per_minute"] == 5
         assert body["allowed_models"] == ["local/gemma4-nvfp4"]
+
+    @pytest.mark.asyncio
+    async def test_sets_token_budget(self, admin_client, scratch_keys_file):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"token_budget_daily": 50_000}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["token_budget_daily"] == 50_000
+        assert body["token_budget_monthly"] is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_clears_token_budget_back_to_unlimited(
+        self, admin_client, scratch_keys_file
+    ):
+        set_response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"token_budget_daily": 50_000}
+        )
+        assert set_response.json()["token_budget_daily"] == 50_000
+
+        clear_response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"token_budget_daily": None}
+        )
+        assert clear_response.status_code == 200
+        assert clear_response.json()["token_budget_daily"] is None
+
+    @pytest.mark.asyncio
+    async def test_omitted_token_budget_leaves_it_untouched(self, admin_client, scratch_keys_file):
+        await admin_client.patch("/api/admin/keys/scratch-key", json={"token_budget_daily": 50_000})
+
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"requests_per_minute": 5}
+        )
+        assert response.status_code == 200
+        assert response.json()["token_budget_daily"] == 50_000
 
     @pytest.mark.asyncio
     async def test_grant_admin_is_live_without_restart(self, admin_client, scratch_keys_file):

@@ -137,6 +137,8 @@ keys:
     key_hash: <sha256 hex digest>
     allowed_models: [nvidia/qwen3.6-nvfp4]   # must be a subset of config/models.yaml's ids
     requests_per_minute: 60              # optional, defaults to 60
+    token_budget_daily: 500000           # optional, defaults to unlimited -- see Token budgets below
+    token_budget_monthly: 10000000       # optional, defaults to unlimited -- see Token budgets below
     is_admin: false                      # optional, defaults to false -- see Admin API below
     admin_scopes: [metrics:read]         # optional, defaults to [] -- see Scoped admin access below
     allowed_guardrails_configs: [content_safety]  # optional, defaults to unrestricted -- see Admin API below
@@ -198,6 +200,43 @@ Where the numbers come from:
   interrupted/errored stream records no usage at all rather than a
   fabricated success-shaped estimate.
 
+### Token budgets
+
+`requests_per_minute` caps *how often* a key can call the gateway;
+`token_budget_daily`/`token_budget_monthly` (`app/auth/budget.py`) cap how
+much it can actually *consume* -- both optional, both default to
+unlimited (same "opt-in cap" posture as `allowed_guardrails_configs`).
+Extends the rate-limiting story from request-rate to actual cost, the
+thing an operator running a shared deployment usually cares about more
+than raw request counts.
+
+Structurally this can't work exactly like rate limiting: a request's
+token cost isn't known until the upstream model has actually generated a
+response, so there's no way to charge a request against its budget before
+running it. What's checked before running it (in `require_api_key`,
+alongside the rate-limit check) is whether the key has *already* exceeded
+its budget from prior requests this window -- if so, `429`
+(`error.type: rate_limit_error`, `error.code: token_budget_exceeded`).
+This is a `429`, not OpenRouter's `402`, matching this codebase's existing
+`rate_limit_exceeded` and OpenAI's own real-API convention of returning
+`429` for quota exhaustion (`insufficient_quota`), so an OpenAI-compatible
+client's existing `429` retry/backoff handling already does something
+sane here.
+
+Windows are calendar-aligned (UTC midnight / UTC 1st-of-month), not a
+rolling N seconds from first use -- a "daily"/"monthly" budget is meant
+to reset predictably, matching OpenRouter's own "daily, weekly, or
+monthly reset windows" framing for the same concept. Same in-memory vs.
+Redis (`REDIS_URL`) split, and the same fail-open-on-Redis-outage posture
+for both `check` and `record`, as [rate limiting](#rate-limiting) and
+[usage accounting](#usage-accounting) -- a token budget is a cost-control
+guard, not a security boundary. The in-memory tracker's per-window
+counters aren't cleaned up on their own (unlike the Redis-backed version,
+whose keys carry a TTL slightly longer than their window), so they grow
+for the life of the process -- fine at realistic key counts, a known
+limitation for a very long-lived, very high-key-count single-process
+deployment.
+
 ### Request logging
 
 Every request gets a `request_id` (`app/core/logging_middleware.py`), echoed
@@ -212,6 +251,7 @@ limiting, and usage accounting.
 | No `Authorization` header (or malformed) | 401 | `authentication_error` | `missing_api_key` |
 | Key doesn't match any configured hash | 401 | `authentication_error` | `invalid_api_key` |
 | Over `requests_per_minute` | 429 | `rate_limit_error` | `rate_limit_exceeded` |
+| Over `token_budget_daily`/`token_budget_monthly` (see [Token budgets](#token-budgets)) | 429 | `rate_limit_error` | `token_budget_exceeded` |
 | Model not in the key's `allowed_models` | 403 | `permission_error` | `model_not_allowed` |
 | `guardrails.config_id` not in the key's `allowed_guardrails_configs` | 403 | `permission_error` | `guardrails_config_not_allowed` |
 | Blocked by the [prompt injection detection](#prompt-injection-detection) guardrail | 403 | `permission_error` | `prompt_injection_detected` |
@@ -377,8 +417,9 @@ access to it even though its content stays hand-edit-only.
 There's also a small admin panel at `/ui/admin.html` (alongside the
 existing chat-tester `/ui`) covering all of the above: a create-key form
 (with `admin_scopes` checkboxes alongside `is_admin`), a keys table with
-editable `allowed_models`/`requests_per_minute`/`is_admin`/`admin_scopes`
-(plus Rotate and Delete) and checkboxes per guardrails config, an editor
+editable `allowed_models`/`requests_per_minute`/`token_budget_daily`/
+`token_budget_monthly`/`is_admin`/`admin_scopes` (plus Rotate and Delete)
+and checkboxes per guardrails config, an editor
 per bundled preset with one `<textarea>` per section (one item per line),
 a "Prompt Injection" card (enable toggle, scope, one action dropdown per
 category, an allow-list textarea, and a "Test your patterns" box that

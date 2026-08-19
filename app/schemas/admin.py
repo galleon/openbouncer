@@ -14,6 +14,9 @@ class AdminKeyItem(BaseModel):
     # anything) -- see APIKeyRecord.allowed_guardrails_configs.
     allowed_guardrails_configs: list[str] | None
     requests_per_minute: int
+    # None means unlimited -- see APIKeyRecord.token_budget_daily/_monthly.
+    token_budget_daily: int | None
+    token_budget_monthly: int | None
     # key_hash intentionally omitted -- no reason to expose hash material
     # over the API even though it isn't reversible to the raw key.
 
@@ -42,6 +45,9 @@ class CreateKeyRequest(BaseModel):
     # a generic Pydantic literal-mismatch error.
     admin_scopes: list[str] = Field(default_factory=list)
     allowed_guardrails_configs: list[str] | None = None
+    # None (the default) means unlimited -- see APIKeyRecord.token_budget_daily/_monthly.
+    token_budget_daily: int | None = Field(default=None, gt=0)
+    token_budget_monthly: int | None = Field(default=None, gt=0)
 
 
 class CreateKeyResponse(BaseModel):
@@ -61,6 +67,15 @@ class UpdateKeyRequest(BaseModel):
     requests_per_minute: int | None = Field(default=None, gt=0)
     is_admin: bool | None = None
     admin_scopes: list[str] | None = None
+    # Unlike the fields above, an explicit `null` here is meaningful (not
+    # just "omitted") -- it clears the budget back to unlimited, since
+    # None *is* APIKeyRecord.token_budget_daily/_monthly's own "unlimited"
+    # value. model_dump(exclude_unset=True) in the route still tells
+    # "omitted" (leave alone) apart from "explicitly sent as null" (clear
+    # it) correctly, since exclude_unset tracks presence in the input, not
+    # falsiness of the value.
+    token_budget_daily: int | None = Field(default=None, gt=0)
+    token_budget_monthly: int | None = Field(default=None, gt=0)
 
 
 class RotateKeyResponse(BaseModel):

@@ -7,6 +7,7 @@ from typing import AsyncIterator, Awaitable, Callable
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
 from app.auth.dependency import (
     AuthContext,
     ensure_guardrails_config_allowed,
@@ -69,6 +70,29 @@ def _requested_config_id(request: ChatCompletionRequest) -> str | None:
     if not _guardrails_requested(request):
         return None
     return request.guardrails.config_id
+
+
+async def _record_usage(
+    usage_tracker: SupportsUsageTracking,
+    budget_tracker: SupportsBudgetTracking,
+    key_id: str,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> None:
+    """Shared by every usage-recording call site in this route: the
+    running-total UsageTracker (see app.auth.usage) and the windowed
+    BudgetTracker (see app.auth.budget) both need the same token counts,
+    at the same point in the request lifecycle -- once real/estimated
+    usage is known, after generation completes."""
+    await usage_tracker.record(
+        key_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+    await budget_tracker.record(key_id, total_tokens)
 
 
 def _sse_chunk(response_id: str, created: int, model: str, *, delta: dict, finish_reason: str | None = None) -> str:
@@ -285,6 +309,7 @@ async def create_chat_completion(
     upstream_client: UpstreamClient = Depends(get_upstream_client),
     auth: AuthContext = Depends(require_api_key),
     usage_tracker: SupportsUsageTracking = Depends(get_usage_tracker),
+    budget_tracker: SupportsBudgetTracking = Depends(get_budget_tracker),
     guardrails: GuardrailsService = Depends(get_guardrails_service),
     pi_config: PromptInjectionConfig = Depends(get_prompt_injection_config),
     ol_config: OutputLeakConfig = Depends(get_output_leak_config),
@@ -422,7 +447,9 @@ async def create_chat_completion(
 
                 async def _on_close() -> None:
                     _record_completion("200")
-                    await usage_tracker.record(
+                    await _record_usage(
+                        usage_tracker,
+                        budget_tracker,
                         auth.key_id,
                         prompt_tokens=usage_holder.get("prompt_tokens", 0),
                         completion_tokens=usage_holder.get("completion_tokens", 0),
@@ -458,7 +485,9 @@ async def create_chat_completion(
                 # Stays empty (0/0/0) otherwise, same as before this existed:
                 # the request itself is still counted, just with no token
                 # counts.
-                await usage_tracker.record(
+                await _record_usage(
+                    usage_tracker,
+                    budget_tracker,
                     auth.key_id,
                     prompt_tokens=usage_holder.get("prompt_tokens", 0),
                     completion_tokens=usage_holder.get("completion_tokens", 0),
@@ -476,7 +505,9 @@ async def create_chat_completion(
         else:
             guardrails_response = None
         if guardrails_response is not None:
-            await usage_tracker.record(
+            await _record_usage(
+                usage_tracker,
+                budget_tracker,
                 auth.key_id,
                 prompt_tokens=guardrails_response.usage.prompt_tokens,
                 completion_tokens=guardrails_response.usage.completion_tokens,
@@ -507,7 +538,9 @@ async def create_chat_completion(
         # upstream happened to echo (its upstream_model name may differ).
         response = response.model_copy(update={"model": request.model})
 
-        await usage_tracker.record(
+        await _record_usage(
+            usage_tracker,
+            budget_tracker,
             auth.key_id,
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,

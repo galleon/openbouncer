@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
 from app.auth.keys import KeyStore, get_key_store, hash_api_key
 from app.auth.rate_limiter import SupportsRateLimiting, get_rate_limiter
 from app.core.errors import OpenAIError
@@ -42,6 +43,7 @@ async def require_api_key(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     key_store: KeyStore = Depends(get_key_store),
     rate_limiter: SupportsRateLimiting = Depends(get_rate_limiter),
+    budget_tracker: SupportsBudgetTracking = Depends(get_budget_tracker),
 ) -> AuthContext:
     if credentials is None or not credentials.credentials:
         logger.warning(
@@ -83,6 +85,32 @@ async def require_api_key(
             error_type="rate_limit_error",
             code="rate_limit_exceeded",
         )
+
+    if record.token_budget_daily is not None or record.token_budget_monthly is not None:
+        within_budget = await budget_tracker.check(
+            record.id,
+            daily_limit=record.token_budget_daily,
+            monthly_limit=record.token_budget_monthly,
+        )
+        if not within_budget:
+            logger.warning(
+                "Auth failed: token budget exceeded for key_id=%s [request_id=%s]",
+                record.id,
+                get_request_id(),
+            )
+            # 429 + rate_limit_error (not 402, unlike OpenRouter's own
+            # budget-limit guardrail) -- matches this codebase's existing
+            # rate_limit_exceeded above and OpenAI's own real-API
+            # convention of returning 429 for quota exhaustion
+            # (`insufficient_quota`), so an OpenAI-compatible client's
+            # existing 429 retry/backoff handling already does something
+            # sane here without special-casing a rarer status code.
+            raise OpenAIError(
+                "This API key has reached its token budget for the current period.",
+                status_code=429,
+                error_type="rate_limit_error",
+                code="token_budget_exceeded",
+            )
 
     return AuthContext(
         key_id=record.id,

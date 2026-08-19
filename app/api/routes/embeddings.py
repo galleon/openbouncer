@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
 from app.auth.dependency import AuthContext, ensure_model_allowed, require_api_key
 from app.auth.usage import SupportsUsageTracking, get_usage_tracker
 from app.core.errors import OpenAIError
@@ -28,6 +29,7 @@ async def create_embeddings(
     upstream_client: UpstreamClient = Depends(get_upstream_client),
     auth: AuthContext = Depends(require_api_key),
     usage_tracker: SupportsUsageTracking = Depends(get_usage_tracker),
+    budget_tracker: SupportsBudgetTracking = Depends(get_budget_tracker),
 ) -> EmbeddingResponse:
     entry = registry.get(request.model)
     if entry is None:
@@ -64,6 +66,7 @@ async def create_embeddings(
         prompt_tokens=response.usage.prompt_tokens,
         total_tokens=response.usage.total_tokens,
     )
+    await budget_tracker.record(auth.key_id, response.usage.total_tokens)
     logger.info(
         "embeddings key_id=%s model=%s total_tokens=%d request_id=%s",
         auth.key_id,

@@ -36,6 +36,8 @@ const createKeyForm = document.getElementById("create-key-form");
 const createKeyIdInput = document.getElementById("create-key-id");
 const createKeyModelsInput = document.getElementById("create-key-models");
 const createKeyRpmInput = document.getElementById("create-key-rpm");
+const createKeyBudgetDailyInput = document.getElementById("create-key-budget-daily");
+const createKeyBudgetMonthlyInput = document.getElementById("create-key-budget-monthly");
 const createKeyAdminInput = document.getElementById("create-key-admin");
 const createKeyScopesEl = document.getElementById("create-key-scopes");
 const createKeyStatusEl = document.getElementById("create-key-status");
@@ -116,6 +118,18 @@ async function apiFetch(path, options = {}) {
   return { response, body };
 }
 
+// Blank means "unlimited" for a token-budget field -- unlike
+// requests_per_minute (which always has some positive value), None/null
+// is a real, meaningful state here (see APIKeyRecord.token_budget_daily/
+// _monthly), so an empty box sends an explicit `null`, not an omitted
+// field.
+function parseOptionalBudget(input) {
+  const trimmed = input.value.trim();
+  if (trimmed === "") return null;
+  const parsed = parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function renderKeysTable(keys) {
   keysTableEl.innerHTML = "";
   const table = document.createElement("table");
@@ -124,6 +138,7 @@ function renderKeysTable(keys) {
   const thead = document.createElement("thead");
   thead.innerHTML =
     "<tr><th>Key</th><th>Admin</th><th>Admin scopes</th><th>Allowed models</th><th>Requests/min</th>" +
+    "<th>Daily budget</th><th>Monthly budget</th>" +
     "<th></th><th>Allowed guardrails configs</th><th></th><th>Actions</th></tr>";
   table.appendChild(thead);
 
@@ -164,6 +179,24 @@ function renderKeysTable(keys) {
     rpmTd.appendChild(rpmInput);
     tr.appendChild(rpmTd);
 
+    const budgetDailyTd = document.createElement("td");
+    const budgetDailyInput = document.createElement("input");
+    budgetDailyInput.type = "number";
+    budgetDailyInput.min = "1";
+    budgetDailyInput.placeholder = "unlimited";
+    if (key.token_budget_daily !== null) budgetDailyInput.value = key.token_budget_daily;
+    budgetDailyTd.appendChild(budgetDailyInput);
+    tr.appendChild(budgetDailyTd);
+
+    const budgetMonthlyTd = document.createElement("td");
+    const budgetMonthlyInput = document.createElement("input");
+    budgetMonthlyInput.type = "number";
+    budgetMonthlyInput.min = "1";
+    budgetMonthlyInput.placeholder = "unlimited";
+    if (key.token_budget_monthly !== null) budgetMonthlyInput.value = key.token_budget_monthly;
+    budgetMonthlyTd.appendChild(budgetMonthlyInput);
+    tr.appendChild(budgetMonthlyTd);
+
     const keyActionTd = document.createElement("td");
     const keySaveButton = document.createElement("button");
     keySaveButton.type = "button";
@@ -188,6 +221,8 @@ function renderKeysTable(keys) {
           requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
           is_admin: adminCheckbox.checked,
           admin_scopes: adminScopes,
+          token_budget_daily: parseOptionalBudget(budgetDailyInput),
+          token_budget_monthly: parseOptionalBudget(budgetMonthlyInput),
         }),
       });
       keySaveButton.disabled = false;
@@ -938,6 +973,8 @@ createKeyForm.addEventListener("submit", async (event) => {
       requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
       is_admin: createKeyAdminInput.checked,
       admin_scopes: adminScopes,
+      token_budget_daily: parseOptionalBudget(createKeyBudgetDailyInput),
+      token_budget_monthly: parseOptionalBudget(createKeyBudgetMonthlyInput),
     }),
   });
   submitButton.disabled = false;

@@ -76,6 +76,15 @@ class APIKeyRecord(BaseModel):
     # explicitly sets this to a (possibly empty) list via the admin API --
     # at that point it's an opt-in allowlist, same idea as allowed_models.
     allowed_guardrails_configs: list[str] | None = None
+    # None (the default) means unlimited -- same "opt-in cap" posture as
+    # allowed_guardrails_configs above. Enforced by app.auth.budget against
+    # cumulative token usage in the current UTC calendar day/month, checked
+    # on every request in require_api_key (see that module for why it's a
+    # separate check()/record() split rather than one atomic call like rate
+    # limiting's). Not billing-grade metering, same caveat as
+    # app.auth.usage.UsageTracker.
+    token_budget_daily: int | None = Field(default=None, gt=0)
+    token_budget_monthly: int | None = Field(default=None, gt=0)
     # Fine-grained admin capabilities for a key that isn't a full
     # `is_admin: true` super-admin -- see ALL_ADMIN_SCOPES. Ignored (every
     # scope is implied) when is_admin is true; only matters for a

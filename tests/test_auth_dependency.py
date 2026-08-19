@@ -10,6 +10,7 @@ from app.auth.dependency import (
     require_api_key,
     require_scope,
 )
+from app.auth.budget import BudgetTracker
 from app.auth.keys import ALL_ADMIN_SCOPES, APIKeyRecord, parse_key_store
 from app.auth.rate_limiter import RateLimiter
 from app.core.errors import OpenAIError
@@ -93,6 +94,84 @@ class TestRequireApiKey:
             )
         assert exc_info.value.status_code == 429
         assert exc_info.value.code == "rate_limit_exceeded"
+        assert exc_info.value.error_type == "rate_limit_error"
+
+
+BUDGET_STORE_YAML = f"""
+keys:
+  - id: budget-key
+    key_hash: {KEY_HASH}
+    allowed_models: [nvidia/qwen3.6-nvfp4]
+    requests_per_minute: 1000000
+    token_budget_daily: 1000
+"""
+
+RAW_KEY_NO_BUDGET = "sk-unit-test-no-budget-0123456789"
+KEY_HASH_NO_BUDGET = hashlib.sha256(RAW_KEY_NO_BUDGET.encode()).hexdigest()
+UNLIMITED_STORE_YAML = f"""
+keys:
+  - id: unlimited-key
+    key_hash: {KEY_HASH_NO_BUDGET}
+    allowed_models: [nvidia/qwen3.6-nvfp4]
+    requests_per_minute: 1000000
+"""
+
+
+class TestTokenBudget:
+    @pytest.mark.asyncio
+    async def test_key_with_no_budget_configured_is_never_checked(self):
+        # Confirms the budget_tracker isn't even consulted for a key with
+        # no token_budget_daily/_monthly set -- passing a tracker that
+        # already reports "over budget" for everything proves the `if`
+        # guard in require_api_key short-circuits before calling it.
+        store = parse_key_store(UNLIMITED_STORE_YAML)
+        limiter = RateLimiter()
+
+        class _AlwaysOverBudget:
+            async def check(self, *args, **kwargs):
+                return False
+
+            async def record(self, *args, **kwargs):
+                pass
+
+        auth = await require_api_key(
+            credentials=_credentials(RAW_KEY_NO_BUDGET),
+            key_store=store,
+            rate_limiter=limiter,
+            budget_tracker=_AlwaysOverBudget(),
+        )
+        assert auth.key_id == "unlimited-key"
+
+    @pytest.mark.asyncio
+    async def test_within_budget_allows_the_request(self):
+        store = parse_key_store(BUDGET_STORE_YAML)
+        limiter = RateLimiter()
+        budget_tracker = BudgetTracker()
+
+        auth = await require_api_key(
+            credentials=_credentials(RAW_KEY),
+            key_store=store,
+            rate_limiter=limiter,
+            budget_tracker=budget_tracker,
+        )
+        assert auth.key_id == "budget-key"
+
+    @pytest.mark.asyncio
+    async def test_over_budget_rejected_with_429(self):
+        store = parse_key_store(BUDGET_STORE_YAML)  # token_budget_daily: 1000
+        limiter = RateLimiter()
+        budget_tracker = BudgetTracker()
+        await budget_tracker.record("budget-key", 1000)
+
+        with pytest.raises(OpenAIError) as exc_info:
+            await require_api_key(
+                credentials=_credentials(RAW_KEY),
+                key_store=store,
+                rate_limiter=limiter,
+                budget_tracker=budget_tracker,
+            )
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.code == "token_budget_exceeded"
         assert exc_info.value.error_type == "rate_limit_error"
 
 
