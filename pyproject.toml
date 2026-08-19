@@ -20,6 +20,13 @@ dev = [
     "pytest-asyncio>=0.23",
     "respx>=0.21",
 ]
+# Separate from dev: browser-based UI smoke tests (tests/e2e/) need a real
+# downloaded browser binary (`playwright install chromium`), not just a
+# pip/uv package -- kept opt-in so `uv sync --extra dev` (what CI and the
+# rest of this test suite already use) stays fast and network-light.
+e2e = [
+    "pytest-playwright>=0.5",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -31,3 +38,7 @@ packages = ["app"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "e2e: browser-based UI smoke test against a live server -- excluded by default, run with `-m e2e` after `uv sync --extra e2e && uv run playwright install chromium`",
+]
+addopts = "-m \"not e2e\""

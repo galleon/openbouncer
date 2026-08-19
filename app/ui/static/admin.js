@@ -56,6 +56,11 @@ const ALL_ADMIN_SCOPES = [
   "activity:read",
 ];
 
+// Shared by every per-category action dropdown (Prompt Injection's and
+// Output Leak's category tables, plus Output Leak's custom-pattern rows) --
+// see buildActionSelect().
+const GUARDRAIL_ACTION_VALUES = ["disabled", "flag", "redact", "block"];
+
 function renderScopeCheckboxes(container, checkedScopes) {
   container.innerHTML = "";
   const checkboxes = {};
@@ -130,314 +135,418 @@ function parseOptionalBudget(input) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function renderKeysTable(keys) {
-  keysTableEl.innerHTML = "";
+// ---------------------------------------------------------------------------
+// Shared table/row-building helpers -- every <table class="admin-table"> in
+// this panel (keys, audit log, both guardrails' category tables) follows the
+// same shape: clear the container, build <thead> from a fixed header, build
+// one <tr> per item via a caller-supplied row builder, wrap the whole table
+// in the horizontal-scroll div every admin-table needs. Extracted here so
+// adding the *next* admin table (there have been four so far: keys, audit
+// log, prompt-injection categories, output-leak categories) means writing
+// just a header + a per-row builder, not re-deriving this scaffolding again.
+// ---------------------------------------------------------------------------
+
+function renderTable(container, headerHtml, items, buildRow) {
+  container.innerHTML = "";
   const table = document.createElement("table");
   table.className = "admin-table";
 
   const thead = document.createElement("thead");
-  thead.innerHTML =
-    "<tr><th>Key</th><th>Admin</th><th>Admin scopes</th><th>Allowed models</th><th>Requests/min</th>" +
-    "<th>Daily budget</th><th>Monthly budget</th>" +
-    "<th></th><th>Allowed guardrails configs</th><th></th><th>Actions</th></tr>";
+  thead.innerHTML = `<tr>${headerHtml}</tr>`;
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  for (const key of keys) {
-    const tr = document.createElement("tr");
-
-    const idTd = document.createElement("td");
-    idTd.textContent = key.id;
-    tr.appendChild(idTd);
-
-    const adminTd = document.createElement("td");
-    const adminCheckbox = document.createElement("input");
-    adminCheckbox.type = "checkbox";
-    adminCheckbox.checked = key.is_admin;
-    adminTd.appendChild(adminCheckbox);
-    tr.appendChild(adminTd);
-
-    const scopesTd = document.createElement("td");
-    const scopesWrapper = document.createElement("div");
-    scopesWrapper.className = "admin-config-checkboxes";
-    scopesTd.appendChild(scopesWrapper);
-    const scopeCheckboxes = renderScopeCheckboxes(scopesWrapper, key.admin_scopes);
-    tr.appendChild(scopesTd);
-
-    const modelsTd = document.createElement("td");
-    const modelsInput = document.createElement("input");
-    modelsInput.type = "text";
-    modelsInput.value = key.allowed_models.join(", ");
-    modelsTd.appendChild(modelsInput);
-    tr.appendChild(modelsTd);
-
-    const rpmTd = document.createElement("td");
-    const rpmInput = document.createElement("input");
-    rpmInput.type = "number";
-    rpmInput.min = "1";
-    rpmInput.value = key.requests_per_minute;
-    rpmTd.appendChild(rpmInput);
-    tr.appendChild(rpmTd);
-
-    const budgetDailyTd = document.createElement("td");
-    const budgetDailyInput = document.createElement("input");
-    budgetDailyInput.type = "number";
-    budgetDailyInput.min = "1";
-    budgetDailyInput.placeholder = "unlimited";
-    if (key.token_budget_daily !== null) budgetDailyInput.value = key.token_budget_daily;
-    budgetDailyTd.appendChild(budgetDailyInput);
-    tr.appendChild(budgetDailyTd);
-
-    const budgetMonthlyTd = document.createElement("td");
-    const budgetMonthlyInput = document.createElement("input");
-    budgetMonthlyInput.type = "number";
-    budgetMonthlyInput.min = "1";
-    budgetMonthlyInput.placeholder = "unlimited";
-    if (key.token_budget_monthly !== null) budgetMonthlyInput.value = key.token_budget_monthly;
-    budgetMonthlyTd.appendChild(budgetMonthlyInput);
-    tr.appendChild(budgetMonthlyTd);
-
-    const keyActionTd = document.createElement("td");
-    const keySaveButton = document.createElement("button");
-    keySaveButton.type = "button";
-    keySaveButton.textContent = "Save";
-    const keyRowStatus = document.createElement("span");
-    keyRowStatus.className = "admin-row-status";
-    keySaveButton.addEventListener("click", async () => {
-      const allowedModels = splitCommaList(modelsInput.value);
-      if (allowedModels.length === 0) {
-        setStatusText(keyRowStatus, "Allowed models can't be empty.", true);
-        return;
-      }
-      const rpm = parseInt(rpmInput.value, 10);
-      const adminScopes = ALL_ADMIN_SCOPES.filter((scope) => scopeCheckboxes[scope].checked);
-      keySaveButton.disabled = true;
-      setStatusText(keyRowStatus, "Saving...");
-      const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          allowed_models: allowedModels,
-          requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
-          is_admin: adminCheckbox.checked,
-          admin_scopes: adminScopes,
-          token_budget_daily: parseOptionalBudget(budgetDailyInput),
-          token_budget_monthly: parseOptionalBudget(budgetMonthlyInput),
-        }),
-      });
-      keySaveButton.disabled = false;
-      setStatusText(keyRowStatus, response.ok ? "Saved." : formatError(body), !response.ok);
-    });
-    keyActionTd.appendChild(keySaveButton);
-    keyActionTd.appendChild(keyRowStatus);
-    tr.appendChild(keyActionTd);
-
-    const configsTd = document.createElement("td");
-    // The flex layout goes on an inner wrapper, not the <td> itself --
-    // overriding a table cell's own `display` away from `table-cell`
-    // breaks its participation in the table's row-height/border-collapse
-    // layout (visibly misaligned row borders in some browsers).
-    const configsWrapper = document.createElement("div");
-    configsWrapper.className = "admin-config-checkboxes";
-    configsTd.appendChild(configsWrapper);
-    // null means unrestricted (this key can set guardrails.config_id to
-    // anything, the state every key has until an admin explicitly
-    // restricts it) -- distinct from an empty array, which means
-    // deliberately restricted to nothing.
-    const isUnrestricted = key.allowed_guardrails_configs === null;
-    if (isUnrestricted) {
-      const note = document.createElement("p");
-      note.className = "admin-hint";
-      note.textContent = "Unrestricted (any config_id allowed). Check any box to restrict.";
-      configsWrapper.appendChild(note);
-    }
-    const checkboxes = {};
-    for (const configId of knownConfigIds) {
-      const label = document.createElement("label");
-      label.className = "checkbox-field admin-checkbox";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = !isUnrestricted && key.allowed_guardrails_configs.includes(configId);
-      checkboxes[configId] = checkbox;
-      label.appendChild(checkbox);
-      label.appendChild(document.createTextNode(configId));
-      configsWrapper.appendChild(label);
-    }
-    tr.appendChild(configsTd);
-
-    const actionTd = document.createElement("td");
-    const saveButton = document.createElement("button");
-    saveButton.type = "button";
-    saveButton.textContent = "Save";
-    const rowStatus = document.createElement("span");
-    rowStatus.className = "admin-row-status";
-    saveButton.addEventListener("click", async () => {
-      const allowed = knownConfigIds.filter((id) => checkboxes[id].checked);
-      saveButton.disabled = true;
-      setStatusText(rowStatus, "Saving...");
-      const { response, body } = await apiFetch(
-        `/api/admin/keys/${encodeURIComponent(key.id)}/guardrails-configs`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ allowed_guardrails_configs: allowed }),
-        },
-      );
-      saveButton.disabled = false;
-      setStatusText(rowStatus, response.ok ? "Saved." : formatError(body), !response.ok);
-    });
-    actionTd.appendChild(saveButton);
-    actionTd.appendChild(rowStatus);
-    tr.appendChild(actionTd);
-
-    const lifecycleTd = document.createElement("td");
-    // Same reasoning as configsWrapper above: the flex layout goes on an
-    // inner wrapper, never directly on the <td>.
-    const lifecycleWrapper = document.createElement("div");
-    lifecycleWrapper.className = "admin-table-actions";
-    lifecycleTd.appendChild(lifecycleWrapper);
-
-    const rotateButton = document.createElement("button");
-    rotateButton.type = "button";
-    rotateButton.textContent = "Rotate";
-    const lifecycleStatus = document.createElement("span");
-    lifecycleStatus.className = "admin-row-status";
-    rotateButton.addEventListener("click", async () => {
-      if (
-        !window.confirm(
-          `Rotate "${key.id}"? Its current raw key will stop working immediately.`,
-        )
-      ) {
-        return;
-      }
-      rotateButton.disabled = true;
-      setStatusText(lifecycleStatus, "Rotating...");
-      const { response, body } = await apiFetch(
-        `/api/admin/keys/${encodeURIComponent(key.id)}/rotate`,
-        { method: "POST" },
-      );
-      rotateButton.disabled = false;
-      if (response.ok) {
-        setStatusText(lifecycleStatus, "Rotated.");
-        renderRawKeyCallout(createKeyResultEl, body.api_key);
-      } else {
-        setStatusText(lifecycleStatus, formatError(body), true);
-      }
-    });
-
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "admin-danger";
-    deleteButton.textContent = "Delete";
-    deleteButton.addEventListener("click", async () => {
-      if (!window.confirm(`Delete key "${key.id}"? This can't be undone.`)) {
-        return;
-      }
-      deleteButton.disabled = true;
-      setStatusText(lifecycleStatus, "Deleting...");
-      const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
-        method: "DELETE",
-      });
-      if (response.ok || response.status === 204) {
-        tr.remove();
-      } else {
-        deleteButton.disabled = false;
-        setStatusText(lifecycleStatus, formatError(body), true);
-      }
-    });
-
-    lifecycleWrapper.appendChild(rotateButton);
-    lifecycleWrapper.appendChild(deleteButton);
-    lifecycleWrapper.appendChild(lifecycleStatus);
-    tr.appendChild(lifecycleTd);
-
-    tbody.appendChild(tr);
+  for (const item of items) {
+    tbody.appendChild(buildRow(item));
   }
   table.appendChild(tbody);
+
   const scrollWrapper = document.createElement("div");
   scrollWrapper.className = "admin-table-scroll";
   scrollWrapper.appendChild(table);
-  keysTableEl.appendChild(scrollWrapper);
+  container.appendChild(scrollWrapper);
+}
+
+function textCell(text) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  return td;
+}
+
+// Same disabled/flag/redact/block dropdown used by both guardrails'
+// category tables and Output Leak's custom-pattern rows.
+function buildActionSelect(selected) {
+  const select = document.createElement("select");
+  for (const value of GUARDRAIL_ACTION_VALUES) {
+    select.appendChild(new Option(value, value, false, value === selected));
+  }
+  return select;
+}
+
+// "instruction_override" -> "Instruction override".
+function categoryLabel(value) {
+  const words = value.split("_");
+  return words[0].charAt(0).toUpperCase() + words[0].slice(1) + " " + words.slice(1).join(" ");
+}
+
+// Renders the Category/Action table both renderPromptInjectionCard and
+// renderOutputLeakCard need (identical shape, different config payload) --
+// returns {category: <select>} so the caller can read the chosen actions
+// back out on Save.
+function buildCategoryActionTable(container, categories) {
+  const selects = {};
+  renderTable(container, "<th>Category</th><th>Action</th>", Object.entries(categories), ([category, action]) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(textCell(categoryLabel(category)));
+
+    const actionTd = document.createElement("td");
+    const select = buildActionSelect(action);
+    selects[category] = select;
+    actionTd.appendChild(select);
+    tr.appendChild(actionTd);
+
+    return tr;
+  });
+  return selects;
+}
+
+// Shared by renderPromptInjectionTestResult/renderOutputLeakTestResult:
+// same "Action: X" / matches list / optional redacted-preview shape, just a
+// different per-match line (prompt-injection includes `via`, output-leak
+// includes its own resolved `action` instead) -- formatMatch supplies that.
+function renderGuardrailTestResult(container, result, formatMatch) {
+  container.innerHTML = "";
+
+  const actionEl = document.createElement("p");
+  actionEl.innerHTML = `Action: <strong>${escapeHtml(result.action)}</strong>`;
+  container.appendChild(actionEl);
+
+  if (result.matches.length === 0) {
+    const none = document.createElement("p");
+    none.className = "admin-hint";
+    none.textContent = "No matches.";
+    container.appendChild(none);
+  } else {
+    const list = document.createElement("ul");
+    for (const match of result.matches) {
+      const li = document.createElement("li");
+      li.textContent = formatMatch(match);
+      list.appendChild(li);
+    }
+    container.appendChild(list);
+  }
+
+  if (result.redacted_preview !== null && result.redacted_preview !== undefined) {
+    const previewLabel = document.createElement("p");
+    previewLabel.textContent = "Redacted preview:";
+    const preview = document.createElement("pre");
+    preview.textContent = result.redacted_preview;
+    container.appendChild(previewLabel);
+    container.appendChild(preview);
+  }
+}
+
+// Shared by the Prompt Injection and Output Leak "Test your patterns"
+// boxes: guard on empty input, disable the button while in flight, POST to
+// `endpoint`, render via `renderResult` on success or show the error text
+// otherwise.
+function wireGuardrailTest(button, textInput, resultEl, endpoint, renderResult) {
+  button.addEventListener("click", async () => {
+    const text = textInput.value.trim();
+    if (!text) {
+      return;
+    }
+    button.disabled = true;
+    resultEl.innerHTML = "";
+    const { response, body } = await apiFetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    button.disabled = false;
+    if (response.ok) {
+      renderResult(body);
+    } else {
+      resultEl.textContent = formatError(body);
+    }
+  });
+}
+
+function buildKeyRow(key) {
+  const tr = document.createElement("tr");
+
+  tr.appendChild(textCell(key.id));
+
+  const adminTd = document.createElement("td");
+  const adminCheckbox = document.createElement("input");
+  adminCheckbox.type = "checkbox";
+  adminCheckbox.checked = key.is_admin;
+  adminTd.appendChild(adminCheckbox);
+  tr.appendChild(adminTd);
+
+  const scopesTd = document.createElement("td");
+  const scopesWrapper = document.createElement("div");
+  scopesWrapper.className = "admin-config-checkboxes";
+  scopesTd.appendChild(scopesWrapper);
+  const scopeCheckboxes = renderScopeCheckboxes(scopesWrapper, key.admin_scopes);
+  tr.appendChild(scopesTd);
+
+  const modelsTd = document.createElement("td");
+  const modelsInput = document.createElement("input");
+  modelsInput.type = "text";
+  modelsInput.value = key.allowed_models.join(", ");
+  modelsTd.appendChild(modelsInput);
+  tr.appendChild(modelsTd);
+
+  const rpmTd = document.createElement("td");
+  const rpmInput = document.createElement("input");
+  rpmInput.type = "number";
+  rpmInput.min = "1";
+  rpmInput.value = key.requests_per_minute;
+  rpmTd.appendChild(rpmInput);
+  tr.appendChild(rpmTd);
+
+  const budgetDailyTd = document.createElement("td");
+  const budgetDailyInput = document.createElement("input");
+  budgetDailyInput.type = "number";
+  budgetDailyInput.min = "1";
+  budgetDailyInput.placeholder = "unlimited";
+  if (key.token_budget_daily !== null) budgetDailyInput.value = key.token_budget_daily;
+  budgetDailyTd.appendChild(budgetDailyInput);
+  tr.appendChild(budgetDailyTd);
+
+  const budgetMonthlyTd = document.createElement("td");
+  const budgetMonthlyInput = document.createElement("input");
+  budgetMonthlyInput.type = "number";
+  budgetMonthlyInput.min = "1";
+  budgetMonthlyInput.placeholder = "unlimited";
+  if (key.token_budget_monthly !== null) budgetMonthlyInput.value = key.token_budget_monthly;
+  budgetMonthlyTd.appendChild(budgetMonthlyInput);
+  tr.appendChild(budgetMonthlyTd);
+
+  const keyActionTd = document.createElement("td");
+  const keySaveButton = document.createElement("button");
+  keySaveButton.type = "button";
+  keySaveButton.textContent = "Save";
+  const keyRowStatus = document.createElement("span");
+  keyRowStatus.className = "admin-row-status";
+  keySaveButton.addEventListener("click", async () => {
+    const allowedModels = splitCommaList(modelsInput.value);
+    if (allowedModels.length === 0) {
+      setStatusText(keyRowStatus, "Allowed models can't be empty.", true);
+      return;
+    }
+    const rpm = parseInt(rpmInput.value, 10);
+    const adminScopes = ALL_ADMIN_SCOPES.filter((scope) => scopeCheckboxes[scope].checked);
+    keySaveButton.disabled = true;
+    setStatusText(keyRowStatus, "Saving...");
+    const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        allowed_models: allowedModels,
+        requests_per_minute: Number.isFinite(rpm) ? rpm : undefined,
+        is_admin: adminCheckbox.checked,
+        admin_scopes: adminScopes,
+        token_budget_daily: parseOptionalBudget(budgetDailyInput),
+        token_budget_monthly: parseOptionalBudget(budgetMonthlyInput),
+      }),
+    });
+    keySaveButton.disabled = false;
+    setStatusText(keyRowStatus, response.ok ? "Saved." : formatError(body), !response.ok);
+  });
+  keyActionTd.appendChild(keySaveButton);
+  keyActionTd.appendChild(keyRowStatus);
+  tr.appendChild(keyActionTd);
+
+  const configsTd = document.createElement("td");
+  // The flex layout goes on an inner wrapper, not the <td> itself --
+  // overriding a table cell's own `display` away from `table-cell`
+  // breaks its participation in the table's row-height/border-collapse
+  // layout (visibly misaligned row borders in some browsers).
+  const configsWrapper = document.createElement("div");
+  configsWrapper.className = "admin-config-checkboxes";
+  configsTd.appendChild(configsWrapper);
+  // null means unrestricted (this key can set guardrails.config_id to
+  // anything, the state every key has until an admin explicitly
+  // restricts it) -- distinct from an empty array, which means
+  // deliberately restricted to nothing.
+  const isUnrestricted = key.allowed_guardrails_configs === null;
+  if (isUnrestricted) {
+    const note = document.createElement("p");
+    note.className = "admin-hint";
+    note.textContent = "Unrestricted (any config_id allowed). Check any box to restrict.";
+    configsWrapper.appendChild(note);
+  }
+  const checkboxes = {};
+  for (const configId of knownConfigIds) {
+    const label = document.createElement("label");
+    label.className = "checkbox-field admin-checkbox";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !isUnrestricted && key.allowed_guardrails_configs.includes(configId);
+    checkboxes[configId] = checkbox;
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(configId));
+    configsWrapper.appendChild(label);
+  }
+  tr.appendChild(configsTd);
+
+  const actionTd = document.createElement("td");
+  const saveButton = document.createElement("button");
+  saveButton.type = "button";
+  saveButton.textContent = "Save";
+  const rowStatus = document.createElement("span");
+  rowStatus.className = "admin-row-status";
+  saveButton.addEventListener("click", async () => {
+    const allowed = knownConfigIds.filter((id) => checkboxes[id].checked);
+    saveButton.disabled = true;
+    setStatusText(rowStatus, "Saving...");
+    const { response, body } = await apiFetch(
+      `/api/admin/keys/${encodeURIComponent(key.id)}/guardrails-configs`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowed_guardrails_configs: allowed }),
+      },
+    );
+    saveButton.disabled = false;
+    setStatusText(rowStatus, response.ok ? "Saved." : formatError(body), !response.ok);
+  });
+  actionTd.appendChild(saveButton);
+  actionTd.appendChild(rowStatus);
+  tr.appendChild(actionTd);
+
+  const lifecycleTd = document.createElement("td");
+  // Same reasoning as configsWrapper above: the flex layout goes on an
+  // inner wrapper, never directly on the <td>.
+  const lifecycleWrapper = document.createElement("div");
+  lifecycleWrapper.className = "admin-table-actions";
+  lifecycleTd.appendChild(lifecycleWrapper);
+
+  const rotateButton = document.createElement("button");
+  rotateButton.type = "button";
+  rotateButton.textContent = "Rotate";
+  const lifecycleStatus = document.createElement("span");
+  lifecycleStatus.className = "admin-row-status";
+  rotateButton.addEventListener("click", async () => {
+    if (
+      !window.confirm(
+        `Rotate "${key.id}"? Its current raw key will stop working immediately.`,
+      )
+    ) {
+      return;
+    }
+    rotateButton.disabled = true;
+    setStatusText(lifecycleStatus, "Rotating...");
+    const { response, body } = await apiFetch(
+      `/api/admin/keys/${encodeURIComponent(key.id)}/rotate`,
+      { method: "POST" },
+    );
+    rotateButton.disabled = false;
+    if (response.ok) {
+      setStatusText(lifecycleStatus, "Rotated.");
+      renderRawKeyCallout(createKeyResultEl, body.api_key);
+    } else {
+      setStatusText(lifecycleStatus, formatError(body), true);
+    }
+  });
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "admin-danger";
+  deleteButton.textContent = "Delete";
+  deleteButton.addEventListener("click", async () => {
+    if (!window.confirm(`Delete key "${key.id}"? This can't be undone.`)) {
+      return;
+    }
+    deleteButton.disabled = true;
+    setStatusText(lifecycleStatus, "Deleting...");
+    const { response, body } = await apiFetch(`/api/admin/keys/${encodeURIComponent(key.id)}`, {
+      method: "DELETE",
+    });
+    if (response.ok || response.status === 204) {
+      tr.remove();
+    } else {
+      deleteButton.disabled = false;
+      setStatusText(lifecycleStatus, formatError(body), true);
+    }
+  });
+
+  lifecycleWrapper.appendChild(rotateButton);
+  lifecycleWrapper.appendChild(deleteButton);
+  lifecycleWrapper.appendChild(lifecycleStatus);
+  tr.appendChild(lifecycleTd);
+
+  return tr;
+}
+
+function renderKeysTable(keys) {
+  renderTable(
+    keysTableEl,
+    "<th>Key</th><th>Admin</th><th>Admin scopes</th><th>Allowed models</th><th>Requests/min</th>" +
+      "<th>Daily budget</th><th>Monthly budget</th>" +
+      "<th></th><th>Allowed guardrails configs</th><th></th><th>Actions</th>",
+    keys,
+    buildKeyRow,
+  );
+}
+
+function buildAuditLogRow(entry) {
+  const tr = document.createElement("tr");
+  tr.appendChild(textCell(entry.timestamp));
+  tr.appendChild(textCell(entry.actor_key_id));
+  tr.appendChild(
+    textCell(entry.resource_id ? `${entry.resource_type}: ${entry.resource_id}` : entry.resource_type),
+  );
+  tr.appendChild(textCell(entry.action));
+  tr.appendChild(textCell(entry.summary));
+
+  const revertTd = document.createElement("td");
+  const revertButton = document.createElement("button");
+  revertButton.type = "button";
+  revertButton.textContent = "Revert";
+  const revertStatus = document.createElement("span");
+  revertStatus.className = "admin-row-status";
+  revertButton.addEventListener("click", async () => {
+    if (
+      !window.confirm(
+        `Revert "${entry.action}" (${entry.summary})? This restores the file content from ` +
+          "just before that change and is itself recorded as a new entry.",
+      )
+    ) {
+      return;
+    }
+    revertButton.disabled = true;
+    setStatusText(revertStatus, "Reverting...");
+    const { response, body } = await apiFetch(`/api/admin/audit-log/${entry.id}/revert`, {
+      method: "POST",
+    });
+    if (response.ok) {
+      // Re-fetches everything the panel currently shows (including the
+      // audit log itself, since isFullAdmin is true here) -- a revert
+      // can change key/guardrails/prompt-injection state too, not just
+      // the log.
+      await loadAdminPanel(currentAdminScopes, currentIsFullAdmin);
+    } else {
+      revertButton.disabled = false;
+      setStatusText(revertStatus, formatError(body), true);
+    }
+  });
+  revertTd.appendChild(revertButton);
+  revertTd.appendChild(revertStatus);
+  tr.appendChild(revertTd);
+
+  return tr;
 }
 
 function renderAuditLogTable(entries) {
-  auditLogTableEl.innerHTML = "";
-  const table = document.createElement("table");
-  table.className = "admin-table";
-
-  const thead = document.createElement("thead");
-  thead.innerHTML =
-    "<tr><th>Time</th><th>Actor</th><th>Resource</th><th>Action</th><th>Summary</th><th></th></tr>";
-  table.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  for (const entry of entries) {
-    const tr = document.createElement("tr");
-
-    const timeTd = document.createElement("td");
-    timeTd.textContent = entry.timestamp;
-    tr.appendChild(timeTd);
-
-    const actorTd = document.createElement("td");
-    actorTd.textContent = entry.actor_key_id;
-    tr.appendChild(actorTd);
-
-    const resourceTd = document.createElement("td");
-    resourceTd.textContent = entry.resource_id
-      ? `${entry.resource_type}: ${entry.resource_id}`
-      : entry.resource_type;
-    tr.appendChild(resourceTd);
-
-    const actionTd = document.createElement("td");
-    actionTd.textContent = entry.action;
-    tr.appendChild(actionTd);
-
-    const summaryTd = document.createElement("td");
-    summaryTd.textContent = entry.summary;
-    tr.appendChild(summaryTd);
-
-    const revertTd = document.createElement("td");
-    const revertButton = document.createElement("button");
-    revertButton.type = "button";
-    revertButton.textContent = "Revert";
-    const revertStatus = document.createElement("span");
-    revertStatus.className = "admin-row-status";
-    revertButton.addEventListener("click", async () => {
-      if (
-        !window.confirm(
-          `Revert "${entry.action}" (${entry.summary})? This restores the file content from ` +
-            "just before that change and is itself recorded as a new entry.",
-        )
-      ) {
-        return;
-      }
-      revertButton.disabled = true;
-      setStatusText(revertStatus, "Reverting...");
-      const { response, body } = await apiFetch(`/api/admin/audit-log/${entry.id}/revert`, {
-        method: "POST",
-      });
-      if (response.ok) {
-        // Re-fetches everything the panel currently shows (including the
-        // audit log itself, since isFullAdmin is true here) -- a revert
-        // can change key/guardrails/prompt-injection state too, not just
-        // the log.
-        await loadAdminPanel(currentAdminScopes, currentIsFullAdmin);
-      } else {
-        revertButton.disabled = false;
-        setStatusText(revertStatus, formatError(body), true);
-      }
-    });
-    revertTd.appendChild(revertButton);
-    revertTd.appendChild(revertStatus);
-    tr.appendChild(revertTd);
-
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  const scrollWrapper = document.createElement("div");
-  scrollWrapper.className = "admin-table-scroll";
-  scrollWrapper.appendChild(table);
-  auditLogTableEl.appendChild(scrollWrapper);
+  renderTable(
+    auditLogTableEl,
+    "<th>Time</th><th>Actor</th><th>Resource</th><th>Action</th><th>Summary</th><th></th>",
+    entries,
+    buildAuditLogRow,
+  );
 }
 
 async function loadAuditLog() {
@@ -530,46 +639,13 @@ function renderGuardrailsCards(configs) {
   }
 }
 
-// "instruction_override" -> "Instruction override".
-function categoryLabel(value) {
-  const words = value.split("_");
-  return words[0].charAt(0).toUpperCase() + words[0].slice(1) + " " + words.slice(1).join(" ");
-}
-
 function renderPromptInjectionCard(config) {
   piEnabledInput.checked = config.enabled;
   piScopeSelect.value = config.scope;
   piDetectEvasionsInput.checked = config.detect_evasions;
   piAllowListInput.value = config.allow_list.join("\n");
 
-  piCategoriesEl.innerHTML = "";
-  const table = document.createElement("table");
-  table.className = "admin-table";
-  const thead = document.createElement("thead");
-  thead.innerHTML = "<tr><th>Category</th><th>Action</th></tr>";
-  table.appendChild(thead);
-  const tbody = document.createElement("tbody");
-
-  const categorySelects = {};
-  for (const [category, action] of Object.entries(config.categories)) {
-    const tr = document.createElement("tr");
-    const nameTd = document.createElement("td");
-    nameTd.textContent = categoryLabel(category);
-    tr.appendChild(nameTd);
-
-    const actionTd = document.createElement("td");
-    const select = document.createElement("select");
-    for (const value of ["disabled", "flag", "redact", "block"]) {
-      select.appendChild(new Option(value, value, false, value === action));
-    }
-    categorySelects[category] = select;
-    actionTd.appendChild(select);
-    tr.appendChild(actionTd);
-
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  piCategoriesEl.appendChild(table);
+  const categorySelects = buildCategoryActionTable(piCategoriesEl, config.categories);
 
   piSaveButton.onclick = async () => {
     const categories = {};
@@ -605,56 +681,21 @@ function renderPromptInjectionCard(config) {
 }
 
 function renderPromptInjectionTestResult(result) {
-  piTestResultEl.innerHTML = "";
-
-  const actionEl = document.createElement("p");
-  actionEl.innerHTML = `Action: <strong>${escapeHtml(result.action)}</strong>`;
-  piTestResultEl.appendChild(actionEl);
-
-  if (result.matches.length === 0) {
-    const none = document.createElement("p");
-    none.className = "admin-hint";
-    none.textContent = "No matches.";
-    piTestResultEl.appendChild(none);
-  } else {
-    const list = document.createElement("ul");
-    for (const match of result.matches) {
-      const li = document.createElement("li");
-      li.textContent = `${categoryLabel(match.category)} (${match.pattern_name}, via ${match.via}): "${match.matched_text}"`;
-      list.appendChild(li);
-    }
-    piTestResultEl.appendChild(list);
-  }
-
-  if (result.redacted_preview !== null && result.redacted_preview !== undefined) {
-    const previewLabel = document.createElement("p");
-    previewLabel.textContent = "Redacted preview:";
-    const preview = document.createElement("pre");
-    preview.textContent = result.redacted_preview;
-    piTestResultEl.appendChild(previewLabel);
-    piTestResultEl.appendChild(preview);
-  }
+  renderGuardrailTestResult(
+    piTestResultEl,
+    result,
+    (match) =>
+      `${categoryLabel(match.category)} (${match.pattern_name}, via ${match.via}): "${match.matched_text}"`,
+  );
 }
 
-piTestRunButton.addEventListener("click", async () => {
-  const text = piTestInput.value.trim();
-  if (!text) {
-    return;
-  }
-  piTestRunButton.disabled = true;
-  piTestResultEl.innerHTML = "";
-  const { response, body } = await apiFetch("/api/admin/prompt-injection/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  piTestRunButton.disabled = false;
-  if (response.ok) {
-    renderPromptInjectionTestResult(body);
-  } else {
-    piTestResultEl.textContent = formatError(body);
-  }
-});
+wireGuardrailTest(
+  piTestRunButton,
+  piTestInput,
+  piTestResultEl,
+  "/api/admin/prompt-injection/test",
+  renderPromptInjectionTestResult,
+);
 
 function addCustomPatternRow(pattern) {
   const row = document.createElement("div");
@@ -670,12 +711,7 @@ function addCustomPatternRow(pattern) {
   patternInput.placeholder = "regex pattern";
   patternInput.value = pattern ? pattern.pattern : "";
 
-  const actionSelect = document.createElement("select");
-  for (const value of ["disabled", "flag", "redact", "block"]) {
-    actionSelect.appendChild(
-      new Option(value, value, false, pattern ? value === pattern.action : value === "flag"),
-    );
-  }
+  const actionSelect = buildActionSelect(pattern ? pattern.action : "flag");
 
   const removeButton = document.createElement("button");
   removeButton.type = "button";
@@ -707,34 +743,7 @@ function renderOutputLeakCard(config) {
   olEnabledInput.checked = config.enabled;
   olAllowListInput.value = config.allow_list.join("\n");
 
-  olCategoriesEl.innerHTML = "";
-  const table = document.createElement("table");
-  table.className = "admin-table";
-  const thead = document.createElement("thead");
-  thead.innerHTML = "<tr><th>Category</th><th>Action</th></tr>";
-  table.appendChild(thead);
-  const tbody = document.createElement("tbody");
-
-  const categorySelects = {};
-  for (const [category, action] of Object.entries(config.categories)) {
-    const tr = document.createElement("tr");
-    const nameTd = document.createElement("td");
-    nameTd.textContent = categoryLabel(category);
-    tr.appendChild(nameTd);
-
-    const actionTd = document.createElement("td");
-    const select = document.createElement("select");
-    for (const value of ["disabled", "flag", "redact", "block"]) {
-      select.appendChild(new Option(value, value, false, value === action));
-    }
-    categorySelects[category] = select;
-    actionTd.appendChild(select);
-    tr.appendChild(actionTd);
-
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  olCategoriesEl.appendChild(table);
+  const categorySelects = buildCategoryActionTable(olCategoriesEl, config.categories);
 
   olCustomPatternsEl.innerHTML = "";
   for (const pattern of config.custom_patterns) {
@@ -775,56 +784,21 @@ function renderOutputLeakCard(config) {
 }
 
 function renderOutputLeakTestResult(result) {
-  olTestResultEl.innerHTML = "";
-
-  const actionEl = document.createElement("p");
-  actionEl.innerHTML = `Action: <strong>${escapeHtml(result.action)}</strong>`;
-  olTestResultEl.appendChild(actionEl);
-
-  if (result.matches.length === 0) {
-    const none = document.createElement("p");
-    none.className = "admin-hint";
-    none.textContent = "No matches.";
-    olTestResultEl.appendChild(none);
-  } else {
-    const list = document.createElement("ul");
-    for (const match of result.matches) {
-      const li = document.createElement("li");
-      li.textContent = `${categoryLabel(match.category)} (${match.pattern_name}, action ${match.action}): "${match.matched_text}"`;
-      list.appendChild(li);
-    }
-    olTestResultEl.appendChild(list);
-  }
-
-  if (result.redacted_preview !== null && result.redacted_preview !== undefined) {
-    const previewLabel = document.createElement("p");
-    previewLabel.textContent = "Redacted preview:";
-    const preview = document.createElement("pre");
-    preview.textContent = result.redacted_preview;
-    olTestResultEl.appendChild(previewLabel);
-    olTestResultEl.appendChild(preview);
-  }
+  renderGuardrailTestResult(
+    olTestResultEl,
+    result,
+    (match) =>
+      `${categoryLabel(match.category)} (${match.pattern_name}, action ${match.action}): "${match.matched_text}"`,
+  );
 }
 
-olTestRunButton.addEventListener("click", async () => {
-  const text = olTestInput.value.trim();
-  if (!text) {
-    return;
-  }
-  olTestRunButton.disabled = true;
-  olTestResultEl.innerHTML = "";
-  const { response, body } = await apiFetch("/api/admin/output-leak/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  olTestRunButton.disabled = false;
-  if (response.ok) {
-    renderOutputLeakTestResult(body);
-  } else {
-    olTestResultEl.textContent = formatError(body);
-  }
-});
+wireGuardrailTest(
+  olTestRunButton,
+  olTestInput,
+  olTestResultEl,
+  "/api/admin/output-leak/test",
+  renderOutputLeakTestResult,
+);
 
 // Tracked so a Revert click (deep inside renderAuditLogTable) can refresh
 // the rest of the panel afterward without re-deriving these from another
