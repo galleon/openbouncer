@@ -96,6 +96,24 @@ OUTPUT_LEAK_ACTIONS_TOTAL = Counter(
 # flag/redact/block) are bounded, code-defined enums -- same cardinality
 # discipline as PROMPT_INJECTION_*_TOTAL above.
 
+# app.auth.alerting -- burst-block detection built on top of the counters
+# above: when one key's block rate crosses a threshold, a webhook fires.
+ALERTS_TRIGGERED_TOTAL = Counter(
+    "openbouncer_alerts_triggered_total",
+    "Burst-block alerts triggered, by which guardrail's blocks crossed the threshold.",
+    ["guardrail"],
+)
+ALERT_WEBHOOK_FAILURES_TOTAL = Counter(
+    "openbouncer_alert_webhook_failures_total",
+    "Alert webhook deliveries that failed (non-2xx response or a request error).",
+)
+# guardrail ("prompt_injection" | "output_leak") is a bounded, code-defined
+# value -- same cardinality discipline as above. key_id is deliberately NOT
+# a label here (unlike USAGE_*_TOTAL's key_id gauges) since an attacker
+# hammering many distinct key_ids could otherwise inflate this counter's
+# cardinality; see the guardrail event log (app.core.guardrail_events) for
+# per-key detail instead.
+
 # Set (not incremented) at scrape time from ModelRegistry's per-model
 # ModelConcurrencyLimiter -- see app/api/routes/metrics.py.
 MODEL_INFLIGHT_REQUESTS = Gauge(

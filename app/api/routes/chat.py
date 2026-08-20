@@ -7,6 +7,10 @@ from typing import AsyncIterator, Awaitable, Callable
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.auth.alerting import SupportsAlertTracking
+from app.auth.alerting import get_alert_tracker
+from app.auth.alerting import is_configured as alerting_is_configured
+from app.auth.alerting import send_alert
 from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
 from app.auth.dependency import (
     AuthContext,
@@ -106,8 +110,25 @@ def _sse_chunk(response_id: str, created: int, model: str, *, delta: dict, finis
     return f"data: {json.dumps(chunk)}\n\n"
 
 
-def _apply_output_leak_guardrail(
-    response: ChatCompletionResponse, ol_config: OutputLeakConfig, *, key_id: str
+async def _maybe_alert_on_block(alert_tracker: SupportsAlertTracking, key_id: str, guardrail: str) -> None:
+    """Called from every block-decision point (prompt-injection's and
+    output-leak's, streaming and non-streaming) right before the request
+    is actually rejected. Zero overhead when alerting isn't configured
+    (see app.auth.alerting.is_configured) -- skips even the burst-counter
+    bookkeeping, not just webhook delivery."""
+    if not alerting_is_configured():
+        return
+    decision = await alert_tracker.record_block(key_id, guardrail)
+    if decision is not None:
+        await send_alert(decision, guardrail=guardrail)
+
+
+async def _apply_output_leak_guardrail(
+    response: ChatCompletionResponse,
+    ol_config: OutputLeakConfig,
+    *,
+    key_id: str,
+    alert_tracker: SupportsAlertTracking,
 ) -> ChatCompletionResponse:
     """Non-streaming counterpart to _with_output_leak_scan below. Unlike
     the prompt-injection pre-filter (which runs before any LLM call and so
@@ -127,6 +148,7 @@ def _apply_output_leak_guardrail(
     _record_output_leak_matches(matches, key_id=key_id, model=response.model, action=action, streaming=False)
 
     if action is OutputLeakAction.BLOCK:
+        await _maybe_alert_on_block(alert_tracker, key_id, "output_leak")
         raise OpenAIError(
             "The model's response was blocked by the output sensitive-information guardrail.",
             status_code=403,
@@ -184,7 +206,12 @@ def _record_output_leak_matches(
 
 
 async def _with_output_leak_scan(
-    agen: AsyncIterator[str], ol_config: OutputLeakConfig, *, key_id: str, model: str
+    agen: AsyncIterator[str],
+    ol_config: OutputLeakConfig,
+    *,
+    key_id: str,
+    model: str,
+    alert_tracker: SupportsAlertTracking,
 ) -> AsyncIterator[str]:
     """Wraps a raw SSE chat-completion-chunk stream (from either a direct
     upstream or a guardrails backend -- same contract either way, see
@@ -232,6 +259,7 @@ async def _with_output_leak_scan(
 
     if action is OutputLeakAction.BLOCK:
         _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
+        await _maybe_alert_on_block(alert_tracker, key_id, "output_leak")
         yield format_sse_error(
             OpenAIError(
                 "The model's response was blocked by the output sensitive-information guardrail.",
@@ -310,6 +338,7 @@ async def create_chat_completion(
     auth: AuthContext = Depends(require_api_key),
     usage_tracker: SupportsUsageTracking = Depends(get_usage_tracker),
     budget_tracker: SupportsBudgetTracking = Depends(get_budget_tracker),
+    alert_tracker: SupportsAlertTracking = Depends(get_alert_tracker),
     guardrails: GuardrailsService = Depends(get_guardrails_service),
     pi_config: PromptInjectionConfig = Depends(get_prompt_injection_config),
     ol_config: OutputLeakConfig = Depends(get_output_leak_config),
@@ -381,6 +410,7 @@ async def create_chat_completion(
                         sorted({m.category.value for m in pi_matches}),
                         get_request_id(),
                     )
+                    await _maybe_alert_on_block(alert_tracker, auth.key_id, "prompt_injection")
                     raise OpenAIError(
                         "Your message was blocked by the prompt-injection guardrail.",
                         status_code=403,
@@ -434,7 +464,11 @@ async def create_chat_completion(
                 # NemoLibraryGuardrailsService reaches the upstream through
                 # its own connection, not upstream_client.
                 guardrails_stream = _with_output_leak_scan(
-                    guardrails_stream, ol_config, key_id=auth.key_id, model=request.model
+                    guardrails_stream,
+                    ol_config,
+                    key_id=auth.key_id,
+                    model=request.model,
+                    alert_tracker=alert_tracker,
                 )
                 limiter = registry.get_concurrency_limiter(request.model)
                 guardrails_stream = _with_concurrency_limit(limiter, guardrails_stream)
@@ -467,7 +501,9 @@ async def create_chat_completion(
                 request=request,
                 usage_holder=usage_holder,
             )
-            agen = _with_output_leak_scan(agen, ol_config, key_id=auth.key_id, model=request.model)
+            agen = _with_output_leak_scan(
+                agen, ol_config, key_id=auth.key_id, model=request.model, alert_tracker=alert_tracker
+            )
             limiter = registry.get_concurrency_limiter(request.model)
             agen = _with_concurrency_limit(limiter, agen)
             logger.info(
@@ -520,7 +556,9 @@ async def create_chat_completion(
                 guardrails_response.usage.total_tokens,
                 get_request_id(),
             )
-            guardrails_response = _apply_output_leak_guardrail(guardrails_response, ol_config, key_id=auth.key_id)
+            guardrails_response = await _apply_output_leak_guardrail(
+                guardrails_response, ol_config, key_id=auth.key_id, alert_tracker=alert_tracker
+            )
             _record_completion("200")
             return guardrails_response
 
@@ -553,7 +591,9 @@ async def create_chat_completion(
             response.usage.total_tokens,
             get_request_id(),
         )
-        response = _apply_output_leak_guardrail(response, ol_config, key_id=auth.key_id)
+        response = await _apply_output_leak_guardrail(
+            response, ol_config, key_id=auth.key_id, alert_tracker=alert_tracker
+        )
         _record_completion("200")
         return response
     except OpenAIError as exc:

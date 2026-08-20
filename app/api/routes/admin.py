@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi import status as http_status
 from pydantic import ValidationError
 
+from app.auth.alerting import send_test_alert
 from app.auth.dependency import AuthContext, require_full_admin, require_scope
 from app.auth.keys import (
     ALL_ADMIN_SCOPES,
@@ -67,6 +68,7 @@ from app.schemas.admin import (
     AdminGuardrailsConfigListResponse,
     AdminKeyItem,
     AdminKeyListResponse,
+    AlertTestResponse,
     CreateKeyRequest,
     CreateKeyResponse,
     GuardrailEventItem,
@@ -732,6 +734,25 @@ async def list_guardrail_events_endpoint(
             _to_guardrail_event_item(e)
             for e in list_guardrail_events(limit=limit, key_id=key_id, guardrail=guardrail, action=action)
         ]
+    )
+
+
+@router.post("/api/admin/alerts/test", response_model=AlertTestResponse)
+async def test_alert_webhook(
+    auth: AuthContext = Depends(require_scope("activity:read")),
+) -> AlertTestResponse:
+    # Same scope as the guardrail-events endpoint above -- alerting is
+    # deployment/observability config (see app.auth.alerting's module
+    # docstring for why it's env-var driven, not an admin-API-editable
+    # policy), so there's no natural "alerting:write" scope to gate a
+    # write-shaped action on; this only ever sends a test webhook, it
+    # never persists anything.
+    result = await send_test_alert()
+    return AlertTestResponse(
+        configured=result.configured,
+        delivered=result.delivered,
+        status_code=result.status_code,
+        error=result.error,
     )
 
 

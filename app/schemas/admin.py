@@ -224,6 +224,17 @@ class GuardrailEventsResponse(BaseModel):
     events: list[GuardrailEventItem]
 
 
+class AlertTestResponse(BaseModel):
+    # False when OPENBOUNCER_ALERT_WEBHOOK_URL isn't set at all -- distinct
+    # from `configured: true, delivered: false` (a real delivery attempt
+    # that failed), so an admin can tell "nothing is set up" apart from
+    # "it's set up but broken".
+    configured: bool
+    delivered: bool
+    status_code: int | None
+    error: str | None
+
+
 class AdminAuditEntryItem(BaseModel):
     id: str
     timestamp: str

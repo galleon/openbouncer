@@ -314,7 +314,7 @@ must not be able to mint/delete keys or rewrite guardrails policy -- set
 | `prompt_injection:write` | `/api/admin/prompt-injection*`: read/edit/test the prompt-injection config. |
 | `output_leak:write` | `/api/admin/output-leak*`: read/edit/test the [output-leak guardrail](#output-leak-guardrail) config. |
 | `metrics:read` | `GET /metrics`. |
-| `activity:read` | `GET /api/admin/activity/overview` and `GET /api/admin/guardrail-events`. |
+| `activity:read` | `GET /api/admin/activity/overview`, `GET /api/admin/guardrail-events`, and `POST /api/admin/alerts/test`. |
 
 `admin_scopes` is ignored (every scope is implied) on a key with
 `is_admin: true`; it only matters for a key that isn't a full admin. Create
@@ -376,6 +376,7 @@ satisfies all of them):
 | POST | `/api/admin/output-leak/test` | `output_leak:write` | Scan sample `text` against the *currently saved* config (works even while `enabled: false`, and never persists anything) -- returns the resolved action, every matching pattern, and a redacted preview when the action is `redact`. |
 | GET | `/api/admin/activity/overview` | `activity:read` | Prometheus-backed traffic/usage summary for the [Observability](#observability) dashboard. |
 | GET | `/api/admin/guardrail-events` | `activity:read` | Filterable list of individual prompt-injection/output-leak decisions -- see [Guardrail decision log](#guardrail-decision-log). |
+| POST | `/api/admin/alerts/test` | `activity:read` | Send a test payload to the configured alert webhook and report the outcome -- see [Alerting](#alerting). Never persists anything. |
 | GET | `/metrics` | `metrics:read` | Prometheus exposition format -- see [Metrics](#metrics). |
 | GET | `/api/admin/audit-log` | full `is_admin: true` | List recent admin writes, most recent first (`?limit=`, default 50, max 200) -- see [Audit log & revert](#audit-log--revert). |
 | POST | `/api/admin/audit-log/{entry_id}/revert` | full `is_admin: true` | Undo one entry: restores the exact file content from just before that write. |
@@ -454,10 +455,11 @@ else.
 
 ### Multi-replica deployments
 
-[Rate limiting](#rate-limiting) and [usage accounting](#usage-accounting)
-are safe to run with multiple gateway replicas -- that's exactly what
-their `REDIS_URL` backing exists for, and Redis genuinely coordinates
-across processes.
+[Rate limiting](#rate-limiting), [usage accounting](#usage-accounting),
+[token budgets](#token-budgets), and [alerting](#alerting)'s burst
+counter/cooldown are all safe to run with multiple gateway replicas --
+that's exactly what their shared `REDIS_URL` backing exists for, and
+Redis genuinely coordinates across processes.
 
 **Admin writes are a different story.** `config/api_keys.yaml`,
 `config/prompt_injection.yaml`, guardrails config edits, and
@@ -533,6 +535,13 @@ mint/delete keys or rewrite guardrails/prompt-injection policy.
   requests. Admin-defined `custom_patterns` matches are grouped under
   `category="custom"` rather than their own name, for the same
   cardinality reason `app/core/metrics.py` documents elsewhere.
+- `openbouncer_alerts_triggered_total{guardrail}` /
+  `openbouncer_alert_webhook_failures_total` -- [Alerting](#alerting):
+  burst-block alerts fired (by which guardrail's blocks crossed the
+  threshold) and webhook deliveries that failed. No `key_id` label
+  (unlike the usage gauges below) -- an attacker hammering many distinct
+  key_ids could otherwise inflate this counter's cardinality; see the
+  guardrail event log for per-key detail instead.
 - `openbouncer_model_inflight_requests` / `openbouncer_model_queued_requests`
   -- live view of each model's concurrency limiter (see below).
 - `openbouncer_usage_requests_total` / `openbouncer_usage_tokens_total`
@@ -578,6 +587,72 @@ The Activity dashboard's "Guardrail events" table (`/ui/activity.html`)
 renders this endpoint with the same three filters, and -- unlike the rest
 of that page -- doesn't need `PROMETHEUS_URL` configured, since it reads
 this log directly rather than querying Prometheus.
+
+### Alerting
+
+The guardrail decision log above and the Activity dashboard are both
+*pull* -- an admin has to go look. `app/auth/alerting.py` adds a *push*:
+when one key's guardrail blocks cross a threshold within a time window, a
+webhook fires. Deployment config, not per-request policy -- env-var
+driven (like `REDIS_URL`/`PROMETHEUS_URL`), not an admin-API-editable
+YAML like the prompt-injection/output-leak configs, since "where to send
+ops alerts" is an infrastructure decision, not a guardrail policy a key's
+traffic should be evaluated against.
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `OPENBOUNCER_ALERT_WEBHOOK_URL` | unset (disabled) | Where to `POST` the alert. Unset means the feature does nothing at all -- not even the burst counter runs (see `app.auth.alerting.is_configured`). |
+| `OPENBOUNCER_ALERT_BLOCK_THRESHOLD` | 5 | Blocks within the window that trigger an alert. |
+| `OPENBOUNCER_ALERT_WINDOW_SECONDS` | 300 | Burst window. |
+| `OPENBOUNCER_ALERT_COOLDOWN_SECONDS` | 1800 | Suppresses re-alerting the same key for this long after one fires -- gates *notification* only, not counting: if blocks continue past the cooldown, the next one that crosses the threshold in whatever the current window is fires a fresh alert. |
+
+Counted **per request**, not per matched category (a request with three
+blocked categories is one block toward the burst, not three), and
+**combined across both guardrails** into one counter per key -- a single
+request can only ever hit one of the two block paths (prompt-injection
+blocks pre-generation, so output-leak's own check never runs for that
+request), so this never double-counts one request under both.
+
+```json
+{
+  "text": "OpenBouncer: key \"foo\" triggered 5 blocks in 300s (prompt_injection: 3, output_leak: 2)",
+  "key_id": "foo",
+  "block_count": 5,
+  "window_seconds": 300,
+  "guardrails": {"prompt_injection": 3, "output_leak": 2},
+  "timestamp": "..."
+}
+```
+
+The `text` field renders directly in a Slack incoming webhook with no
+Slack-specific code on this side; the structured fields work for any
+other receiver. **Never includes match snippets or content** -- only
+counts and categories -- so a webhook pointed at a third party can't
+become a second leak of whatever the guardrail just blocked; the actual
+matched content stays behind the authenticated `GET
+/api/admin/guardrail-events` above.
+
+Delivery is fire-and-forget: the `POST` runs as an independent background
+task, not awaited on the request path, so a slow or unreachable webhook
+can never add latency to (or fail) the response the caller is actually
+waiting for. Single best-effort attempt, no retries -- same fail-open
+posture already applied to every Redis-backed tracker in this codebase
+(rate limiting, usage, budgets), now extended to webhook delivery: a
+failure is logged and counted (`openbouncer_alert_webhook_failures_total`)
+and otherwise ignored. With `REDIS_URL` set, the burst counter and the
+alert-vs-cooldown decision are both coordinated across replicas the same
+way rate limiting/usage/budgets already are (see [Multi-replica
+deployments](#multi-replica-deployments)) -- including the cooldown claim
+itself, via an atomic `SET NX EX`, so two replicas racing on the same
+burst can't both fire.
+
+`POST /api/admin/alerts/test` (gated by `activity:read`, same reasoning
+as the guardrail-events endpoint -- there's no "alerting:write" scope
+since nothing here is ever persisted) sends a clearly-labeled test
+payload to the configured webhook and reports the outcome
+(`configured`/`delivered`/`status_code`/`error`) in the response, so an
+operator can verify their webhook URL actually works instead of finding
+out it was typo'd only when a real burst happens.
 
 ### Structured logs
 
