@@ -264,3 +264,15 @@ class AdminAuditLogResponse(BaseModel):
 class RevertAuditEntryResponse(BaseModel):
     reverted_entry: AdminAuditEntryItem
     revert_entry: AdminAuditEntryItem
+
+
+class ChainVerificationResponse(BaseModel):
+    # See app.core.hash_chain.ChainVerificationResult -- what "valid" does
+    # and doesn't prove is documented there, not just in this response.
+    valid: bool
+    verified_count: int
+    # Entries written before this feature existed, which have no
+    # hash/prev_hash to check -- counted, not treated as a failure.
+    legacy_unchained_count: int
+    broken_at_id: str | None
+    broken_reason: str | None

@@ -1,3 +1,7 @@
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 from app.core.guardrail_events import record_event
@@ -119,3 +123,51 @@ class TestListGuardrailEvents:
         assert response.status_code == 400
         response = await admin_client.get("/api/admin/guardrail-events?limit=201")
         assert response.status_code == 400
+
+
+class TestVerifyGuardrailEventsChain:
+    @pytest.mark.asyncio
+    async def test_non_admin_rejected(self, client):
+        response = await client.get("/api/admin/guardrail-events/verify")
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_scoped_to_activity_read_is_allowed(self, observer_client):
+        # Same scope as GET /api/admin/guardrail-events -- see that
+        # endpoint's own scope test above.
+        response = await observer_client.get("/api/admin/guardrail-events/verify")
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_valid_when_nothing_recorded(self, admin_client):
+        response = await admin_client.get("/api/admin/guardrail-events/verify")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["valid"] is True
+        assert body["verified_count"] == 0
+        assert body["broken_at_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_valid_after_recording_events(self, admin_client):
+        _record()
+        _record()
+        response = await admin_client.get("/api/admin/guardrail-events/verify")
+        body = response.json()
+        assert body["valid"] is True
+        assert body["verified_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_detects_tampering(self, admin_client):
+        _record()
+        _record()
+        log_path = Path(os.environ["OPENBOUNCER_GUARDRAIL_EVENTS_PATH"])
+        lines = log_path.read_text().splitlines()
+        tampered = json.loads(lines[0])
+        tampered["action"] = "flag"
+        lines[0] = json.dumps(tampered)
+        log_path.write_text("\n".join(lines) + "\n")
+
+        response = await admin_client.get("/api/admin/guardrail-events/verify")
+        body = response.json()
+        assert body["valid"] is False
+        assert body["broken_reason"] is not None

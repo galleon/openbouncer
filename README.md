@@ -547,6 +547,49 @@ this panel's sections at all (there's nothing here it can use), while one
 scoped to `guardrails:write` sees a working guardrails editor and nothing
 else.
 
+### Tamper-evident audit log
+
+Both the [admin audit log](#audit-log--revert) and the [guardrail decision
+log](#guardrail-decision-log) are hash-chained: every entry's `hash` covers
+its own content plus the previous entry's `hash` (`prev_hash`), so editing,
+deleting, or reordering any past entry breaks every hash from that point
+forward. `GET /api/admin/audit-log/verify` (full-admin only, matching the
+audit log's own gate) and `GET /api/admin/guardrail-events/verify`
+(`activity:read`, matching that log's own gate) walk the whole file and
+report `{valid, verified_count, legacy_unchained_count, broken_at_id,
+broken_reason}`. The same check also runs offline, without the server
+running, against either log file directly:
+
+```
+uv run python -m app.core.hash_chain config/audit_log.jsonl
+```
+
+**What this proves, and what it doesn't.** This detects internal
+inconsistency: nothing in the file changed after the fact without leaving a
+gap a reviewer can point to. It does **not** protect against someone who
+has filesystem write access to the log *and* understands this mechanism --
+that person can regenerate the whole chain from scratch, consistently. Real
+protection against that needs external anchoring (publishing periodic root
+hashes somewhere this project doesn't control), which isn't implemented.
+This is the same class of claim as [Supply chain](#supply-chain)'s
+signatures: checkable, not a promise trusted on faith -- but checkable
+against *this file*, not against an outside authority.
+
+Both logs also trim their oldest entries once they exceed their retention
+cap (see [Audit log & revert](#audit-log--revert)'s and [Guardrail decision
+log](#guardrail-decision-log)'s retention notes) -- each trim writes a small
+sidecar checkpoint (`*.chain_checkpoint.json`, alongside the `.jsonl` file)
+recording the hash of the last entry evicted, so `verify` can confirm the
+kept entries genuinely continue that chain rather than treating the trim as
+an unverifiable gap.
+
+Deployments upgrading from a version before this feature existed have
+existing log lines with no `hash`/`prev_hash` at all. Those aren't
+retroactively hashed -- doing so would fabricate a chain across history this
+code can't actually vouch for. The first entry written after upgrading
+starts a fresh chain, and `verify` reports the pre-existing lines as
+`legacy_unchained_count` rather than passing or failing them.
+
 ### Multi-replica deployments
 
 [Rate limiting](#rate-limiting), [usage accounting](#usage-accounting),
@@ -694,6 +737,9 @@ The Activity dashboard's "Guardrail events" table (`/ui/activity.html`)
 renders this endpoint with the same three filters, and -- unlike the rest
 of that page -- doesn't need `PROMETHEUS_URL` configured, since it reads
 this log directly rather than querying Prometheus.
+
+Like the admin audit log, this log is hash-chained -- see [Tamper-evident
+audit log](#tamper-evident-audit-log).
 
 ### Alerting
 

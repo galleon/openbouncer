@@ -1,9 +1,11 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from app.core.audit import get_entry, list_entries, record_entry, revert_entry
+from app.core.audit import get_entry, list_entries, record_entry, revert_entry, verify_chain
+from app.core.hash_chain import GENESIS_HASH
 
 
 @pytest.fixture(autouse=True)
@@ -230,3 +232,96 @@ class TestRetention:
         log_path = Path(os.environ["OPENBOUNCER_AUDIT_LOG_PATH"])
         # Default (5000) is well above 10 -- nothing gets trimmed.
         assert len(log_path.read_text().splitlines()) == 10
+
+
+class TestHashChain:
+    def _record(self, tmp_path, action: str):
+        return record_entry(
+            actor_key_id="admin-key",
+            resource_type="api_keys",
+            resource_id=None,
+            action=action,
+            summary="",
+            path=tmp_path / "f.yaml",
+            before="",
+            after="",
+        )
+
+    def test_first_entry_chains_from_genesis(self, tmp_path):
+        entry = self._record(tmp_path, "action-0")
+        assert entry.prev_hash == GENESIS_HASH
+        assert entry.hash
+
+    def test_entries_chain_to_each_other(self, tmp_path):
+        first = self._record(tmp_path, "action-0")
+        second = self._record(tmp_path, "action-1")
+        assert second.prev_hash == first.hash
+
+    def test_verify_chain_valid_after_normal_writes(self, tmp_path):
+        for i in range(5):
+            self._record(tmp_path, f"action-{i}")
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 5
+
+    def test_verify_chain_valid_on_empty_log(self):
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 0
+
+    def test_verify_chain_detects_direct_file_tampering(self, tmp_path):
+        self._record(tmp_path, "action-0")
+        self._record(tmp_path, "action-1")
+
+        log_path = Path(os.environ["OPENBOUNCER_AUDIT_LOG_PATH"])
+        lines = log_path.read_text().splitlines()
+        tampered = json.loads(lines[0])
+        tampered["summary"] = "not what was actually recorded"
+        lines[0] = json.dumps(tampered)
+        log_path.write_text("\n".join(lines) + "\n")
+
+        result = verify_chain()
+        assert result.valid is False
+        assert result.broken_reason is not None
+
+    def test_verify_chain_stays_valid_across_a_trim(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENBOUNCER_AUDIT_LOG_MAX_ENTRIES", "3")
+        for i in range(6):
+            self._record(tmp_path, f"action-{i}")
+
+        # A checkpoint should exist now (3 entries were trimmed away), and
+        # verification of the remaining 3 should still succeed by
+        # continuing from it.
+        log_path = Path(os.environ["OPENBOUNCER_AUDIT_LOG_PATH"])
+        checkpoint_path = log_path.with_name("audit_log.chain_checkpoint.json")
+        assert checkpoint_path.exists()
+
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 3
+
+    def test_verify_chain_tolerates_pre_upgrade_legacy_lines(self, tmp_path):
+        # Simulates a deployment upgrading to this feature with an existing,
+        # unchained log already on disk.
+        log_path = tmp_path / "audit_log.jsonl"
+        os.environ["OPENBOUNCER_AUDIT_LOG_PATH"] = str(log_path)
+        legacy_entry = {
+            "id": "legacy-1",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "actor_key_id": "admin-key",
+            "resource_type": "api_keys",
+            "resource_id": None,
+            "action": "create_key",
+            "summary": "written before this feature existed",
+            "path": str(tmp_path / "f.yaml"),
+            "before": "",
+            "after": "",
+        }
+        log_path.write_text(json.dumps(legacy_entry) + "\n")
+
+        self._record(tmp_path, "action-after-upgrade")
+
+        result = verify_chain()
+        assert result.valid is True
+        assert result.legacy_unchained_count == 1
+        assert result.verified_count == 1

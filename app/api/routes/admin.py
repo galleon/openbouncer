@@ -27,8 +27,10 @@ from app.auth.keys import (
 )
 from app.core.audit import list_entries as list_audit_entries
 from app.core.audit import revert_entry as revert_audit_entry_by_id
+from app.core.audit import verify_chain as verify_audit_chain
 from app.core.errors import OpenAIError
 from app.core.guardrail_events import list_events as list_guardrail_events
+from app.core.guardrail_events import verify_chain as verify_guardrail_events_chain
 from app.core.request_context import get_request_id
 from app.guardrails.catalog import GuardrailsCatalogService, get_guardrails_catalog_service
 from app.guardrails.editable_config import (
@@ -69,6 +71,7 @@ from app.schemas.admin import (
     AdminKeyItem,
     AdminKeyListResponse,
     AlertTestResponse,
+    ChainVerificationResponse,
     CreateKeyRequest,
     CreateKeyResponse,
     GuardrailEventItem,
@@ -741,6 +744,22 @@ async def list_guardrail_events_endpoint(
     )
 
 
+@router.get("/api/admin/guardrail-events/verify", response_model=ChainVerificationResponse)
+async def verify_guardrail_events_endpoint(
+    auth: AuthContext = Depends(require_scope("activity:read")),
+) -> ChainVerificationResponse:
+    # Same scope as GET /api/admin/guardrail-events above -- this is a
+    # read-only diagnostic over that same log, not a write capability.
+    result = verify_guardrail_events_chain()
+    return ChainVerificationResponse(
+        valid=result.valid,
+        verified_count=result.verified_count,
+        legacy_unchained_count=result.legacy_unchained_count,
+        broken_at_id=result.broken_at_id,
+        broken_reason=result.broken_reason,
+    )
+
+
 @router.post("/api/admin/alerts/test", response_model=AlertTestResponse)
 async def test_alert_webhook(
     auth: AuthContext = Depends(require_scope("activity:read")),
@@ -779,6 +798,22 @@ async def list_audit_log(
 ) -> AdminAuditLogResponse:
     return AdminAuditLogResponse(
         entries=[_to_audit_entry_item(e) for e in list_audit_entries(limit=limit)]
+    )
+
+
+@router.get("/api/admin/audit-log/verify", response_model=ChainVerificationResponse)
+async def verify_audit_log_endpoint(
+    auth: AuthContext = Depends(require_full_admin),
+) -> ChainVerificationResponse:
+    # Same gate as the other /api/admin/audit-log* endpoints above --
+    # require_full_admin, not activity:read, matching list_audit_log.
+    result = verify_audit_chain()
+    return ChainVerificationResponse(
+        valid=result.valid,
+        verified_count=result.verified_count,
+        legacy_unchained_count=result.legacy_unchained_count,
+        broken_at_id=result.broken_at_id,
+        broken_reason=result.broken_reason,
     )
 
 

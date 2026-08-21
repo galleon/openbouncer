@@ -1,9 +1,11 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from app.core.guardrail_events import list_events, record_event
+from app.core.guardrail_events import list_events, record_event, verify_chain
+from app.core.hash_chain import GENESIS_HASH
 
 
 def _record(**overrides):
@@ -172,3 +174,79 @@ class TestRetention:
         log_path = Path(os.environ["OPENBOUNCER_GUARDRAIL_EVENTS_PATH"])
         # Default (20000) is well above 10 -- nothing gets trimmed.
         assert len(log_path.read_text().splitlines()) == 10
+
+
+class TestHashChain:
+    def test_first_event_chains_from_genesis(self):
+        event = _record()
+        assert event.prev_hash == GENESIS_HASH
+        assert event.hash
+
+    def test_events_chain_to_each_other(self):
+        first = _record()
+        second = _record()
+        assert second.prev_hash == first.hash
+
+    def test_verify_chain_valid_after_normal_writes(self):
+        for i in range(5):
+            _record(pattern_name=f"pattern-{i}")
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 5
+
+    def test_verify_chain_valid_on_empty_log(self):
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 0
+
+    def test_verify_chain_detects_direct_file_tampering(self):
+        _record()
+        _record()
+
+        log_path = Path(os.environ["OPENBOUNCER_GUARDRAIL_EVENTS_PATH"])
+        lines = log_path.read_text().splitlines()
+        tampered = json.loads(lines[0])
+        tampered["snippet"] = "not what was actually recorded"
+        lines[0] = json.dumps(tampered)
+        log_path.write_text("\n".join(lines) + "\n")
+
+        result = verify_chain()
+        assert result.valid is False
+
+    def test_verify_chain_stays_valid_across_a_trim(self, monkeypatch):
+        monkeypatch.setenv("OPENBOUNCER_GUARDRAIL_EVENTS_MAX_ENTRIES", "3")
+        for i in range(6):
+            _record(pattern_name=f"pattern-{i}")
+
+        log_path = Path(os.environ["OPENBOUNCER_GUARDRAIL_EVENTS_PATH"])
+        checkpoint_path = log_path.with_name("guardrail_events.chain_checkpoint.json")
+        assert checkpoint_path.exists()
+
+        result = verify_chain()
+        assert result.valid is True
+        assert result.verified_count == 3
+
+    def test_verify_chain_tolerates_pre_upgrade_legacy_lines(self, tmp_path):
+        log_path = tmp_path / "guardrail_events.jsonl"
+        os.environ["OPENBOUNCER_GUARDRAIL_EVENTS_PATH"] = str(log_path)
+        legacy_event = {
+            "id": "legacy-1",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "request_id": None,
+            "key_id": "some-key",
+            "guardrail": "prompt_injection",
+            "model": "local/gemma4-nvfp4",
+            "category": "instruction_override",
+            "pattern_name": "ignore_instructions",
+            "action": "block",
+            "via": "direct",
+            "snippet": "written before this feature existed",
+        }
+        log_path.write_text(json.dumps(legacy_event) + "\n")
+
+        _record()
+
+        result = verify_chain()
+        assert result.valid is True
+        assert result.legacy_unchained_count == 1
+        assert result.verified_count == 1

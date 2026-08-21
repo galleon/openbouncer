@@ -25,8 +25,15 @@ distributed storage, and record_entry()'s append+trim isn't safe against
 another *process* appending or trimming at the same instant (only against
 other coroutines within the same process -- see record_entry()'s
 docstring).
+
+Tamper-evident: every entry is hash-chained to the one before it (see
+app.core.hash_chain for the mechanism, and what it does/doesn't prove).
+verify_chain() below checks the whole file; see also
+`GET /api/admin/audit-log/verify` and the offline
+`python -m app.core.hash_chain` CLI.
 """
 
+import dataclasses
 import json
 import os
 import uuid
@@ -35,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.atomic_write import atomic_write_text
+from app.core.hash_chain import ChainVerificationResult, compute_hash, previous_hash, verify_log_file, write_checkpoint
 
 DEFAULT_AUDIT_LOG_PATH = Path(__file__).resolve().parents[2] / "config" / "audit_log.jsonl"
 AUDIT_LOG_PATH_ENV_VAR = "OPENBOUNCER_AUDIT_LOG_PATH"
@@ -81,6 +89,12 @@ class AuditEntry:
     path: str
     before: str
     after: str
+    # Hash chain -- see app.core.hash_chain's module docstring. Default ""
+    # only so pre-upgrade log lines (written before these fields existed)
+    # still parse; every entry recorded by this version of the code always
+    # sets both.
+    prev_hash: str = ""
+    hash: str = ""
 
 
 def _audit_log_path() -> Path:
@@ -113,6 +127,9 @@ def record_entry(
     sequence is atomic with respect to the rest of the event loop even
     though it isn't behind an explicit lock.
     """
+    log_path = _audit_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    prev_hash = previous_hash(log_path)
     entry = AuditEntry(
         id=uuid.uuid4().hex,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -124,9 +141,10 @@ def record_entry(
         path=str(path),
         before=before,
         after=after,
+        prev_hash=prev_hash,
     )
-    log_path = _audit_log_path()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {k: v for k, v in asdict(entry).items() if k not in ("hash", "prev_hash")}
+    entry = dataclasses.replace(entry, hash=compute_hash(prev_hash, payload))
     with open(log_path, "a") as f:
         f.write(json.dumps(asdict(entry)) + "\n")
     _trim_if_needed(log_path)
@@ -146,8 +164,20 @@ def _trim_if_needed(log_path: Path) -> None:
     lines = log_path.read_text().splitlines()
     if len(lines) <= max_entries:
         return
-    trimmed = "\n".join(lines[-max_entries:]) + "\n"
-    atomic_write_text(log_path, trimmed)
+    trimmed_away = lines[:-max_entries]
+    kept = lines[-max_entries:]
+    trimmed_text = "\n".join(kept) + "\n"
+    atomic_write_text(log_path, trimmed_text)
+    # See app.core.hash_chain's module docstring -- the checkpoint records
+    # what the trimmed-away portion's chain ended at, so verify_log_file
+    # can check the kept file's first entry continues from it rather than
+    # silently treating the trim as an unverifiable gap.
+    last_trimmed = json.loads(trimmed_away[-1]) if trimmed_away else {}
+    write_checkpoint(
+        log_path,
+        trimmed_through_hash=last_trimmed.get("hash") or None,
+        newly_trimmed_count=len(trimmed_away),
+    )
 
 
 def _read_all_entries() -> list[AuditEntry]:
@@ -158,8 +188,18 @@ def _read_all_entries() -> list[AuditEntry]:
     for line in log_path.read_text().splitlines():
         if not line.strip():
             continue
-        entries.append(AuditEntry(**json.loads(line)))
+        data = json.loads(line)
+        data.setdefault("prev_hash", "")
+        data.setdefault("hash", "")
+        entries.append(AuditEntry(**data))
     return entries
+
+
+def verify_chain() -> ChainVerificationResult:
+    """Verifies the audit log's hash chain -- see
+    app.core.hash_chain.verify_log_file / the module docstring there for
+    what this does and doesn't prove."""
+    return verify_log_file(_audit_log_path())
 
 
 def list_entries(*, limit: int = 50) -> list[AuditEntry]:

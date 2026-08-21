@@ -42,8 +42,15 @@ category placeholder for *every* event, prompt-injection included --
 category/pattern_name/action/via/model/key_id/request_id are all
 classification metadata, never content, so investigation still works, just
 without ever writing the matched text itself to disk.
+
+Tamper-evident: every entry is hash-chained to the one before it (see
+app.core.hash_chain for the mechanism, and what it does/doesn't prove).
+verify_chain() below checks the whole file; see also
+`GET /api/admin/guardrail-events/verify` and the offline
+`python -m app.core.hash_chain` CLI.
 """
 
+import dataclasses
 import json
 import os
 import uuid
@@ -52,6 +59,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.atomic_write import atomic_write_text
+from app.core.hash_chain import ChainVerificationResult, compute_hash, previous_hash, verify_log_file, write_checkpoint
 
 DEFAULT_EVENTS_PATH = Path(__file__).resolve().parents[2] / "config" / "guardrail_events.jsonl"
 EVENTS_PATH_ENV_VAR = "OPENBOUNCER_GUARDRAIL_EVENTS_PATH"
@@ -114,6 +122,11 @@ class GuardrailEvent:
     via: str | None
     # See the module docstring's "Snippet privacy" paragraph.
     snippet: str
+    # Hash chain -- see app.core.hash_chain's module docstring and
+    # app.core.audit.AuditEntry's matching fields for why these default to
+    # "" (pre-upgrade log lines have neither).
+    prev_hash: str = ""
+    hash: str = ""
 
 
 def _events_path() -> Path:
@@ -145,6 +158,9 @@ def record_event(
     bypassed by a new call site forgetting to check it.
     """
     effective_snippet = snippet if _log_prompt_content() else f"[{category}]"
+    path = _events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prev_hash = previous_hash(path)
     event = GuardrailEvent(
         id=uuid.uuid4().hex,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -157,9 +173,10 @@ def record_event(
         action=action,
         via=via,
         snippet=effective_snippet[:_MAX_SNIPPET_LENGTH],
+        prev_hash=prev_hash,
     )
-    path = _events_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {k: v for k, v in asdict(event).items() if k not in ("hash", "prev_hash")}
+    event = dataclasses.replace(event, hash=compute_hash(prev_hash, payload))
     with open(path, "a") as f:
         f.write(json.dumps(asdict(event)) + "\n")
     _trim_if_needed(path)
@@ -173,8 +190,16 @@ def _trim_if_needed(path: Path) -> None:
     lines = path.read_text().splitlines()
     if len(lines) <= max_entries:
         return
-    trimmed = "\n".join(lines[-max_entries:]) + "\n"
-    atomic_write_text(path, trimmed)
+    trimmed_away = lines[:-max_entries]
+    kept = lines[-max_entries:]
+    trimmed_text = "\n".join(kept) + "\n"
+    atomic_write_text(path, trimmed_text)
+    last_trimmed = json.loads(trimmed_away[-1]) if trimmed_away else {}
+    write_checkpoint(
+        path,
+        trimmed_through_hash=last_trimmed.get("hash") or None,
+        newly_trimmed_count=len(trimmed_away),
+    )
 
 
 def _read_all_events() -> list[GuardrailEvent]:
@@ -185,8 +210,18 @@ def _read_all_events() -> list[GuardrailEvent]:
     for line in path.read_text().splitlines():
         if not line.strip():
             continue
-        events.append(GuardrailEvent(**json.loads(line)))
+        data = json.loads(line)
+        data.setdefault("prev_hash", "")
+        data.setdefault("hash", "")
+        events.append(GuardrailEvent(**data))
     return events
+
+
+def verify_chain() -> ChainVerificationResult:
+    """Verifies the guardrail-events log's hash chain -- see
+    app.core.hash_chain.verify_log_file / the module docstring there for
+    what this does and doesn't prove."""
+    return verify_log_file(_events_path())
 
 
 def list_events(

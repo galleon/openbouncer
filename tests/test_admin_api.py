@@ -1,4 +1,6 @@
 import hashlib
+import json
+import os
 import shutil
 from pathlib import Path
 
@@ -1221,6 +1223,58 @@ class TestAuditLog:
         response = await admin_client.get("/api/admin/audit-log?limit=2")
         assert response.status_code == 200
         assert len(response.json()["entries"]) == 2
+
+
+class TestVerifyAuditLogChain:
+    @pytest.mark.asyncio
+    async def test_non_admin_rejected(self, client):
+        response = await client.get("/api/admin/audit-log/verify")
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_scoped_non_full_admin_rejected(self, observer_client):
+        # Same gate as GET /api/admin/audit-log -- require_full_admin, not
+        # activity:read. See TestAuditLog.test_scoped_non_full_admin_rejected.
+        response = await observer_client.get("/api/admin/audit-log/verify")
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_valid_when_nothing_recorded(self, admin_client):
+        response = await admin_client.get("/api/admin/audit-log/verify")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["valid"] is True
+        assert body["verified_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_valid_after_admin_writes(self, admin_client, scratch_keys_file):
+        for i in range(3):
+            await admin_client.post(
+                "/api/admin/keys",
+                json={"id": f"key-{i}", "allowed_models": ["local/gemma4-nvfp4"]},
+            )
+        response = await admin_client.get("/api/admin/audit-log/verify")
+        body = response.json()
+        assert body["valid"] is True
+        assert body["verified_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_detects_tampering(self, admin_client, scratch_keys_file):
+        await admin_client.post(
+            "/api/admin/keys",
+            json={"id": "audited-key", "allowed_models": ["local/gemma4-nvfp4"]},
+        )
+        log_path = Path(os.environ["OPENBOUNCER_AUDIT_LOG_PATH"])
+        lines = log_path.read_text().splitlines()
+        tampered = json.loads(lines[0])
+        tampered["actor_key_id"] = "someone-else"
+        lines[0] = json.dumps(tampered)
+        log_path.write_text("\n".join(lines) + "\n")
+
+        response = await admin_client.get("/api/admin/audit-log/verify")
+        body = response.json()
+        assert body["valid"] is False
+        assert body["broken_reason"] is not None
 
 
 class TestLastAdminKeyGuard:
