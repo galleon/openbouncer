@@ -17,14 +17,14 @@ is fine at the size an admin action log actually reaches (this is not a
 high-frequency, request-path log -- see app.core.logging_middleware for
 that).
 
-Single-writer assumption: like the config files it describes, this log
-assumes one process (or several processes sharing a filesystem, and even
-then only safely for appends -- see the README's "Multi-replica
-deployments" section) owns OPENBOUNCER_AUDIT_LOG_PATH. It is not
-distributed storage, and record_entry()'s append+trim isn't safe against
-another *process* appending or trimming at the same instant (only against
-other coroutines within the same process -- see record_entry()'s
-docstring).
+Multi-replica: record_entry()'s append+trim is wrapped in
+app.core.distributed_lock.admin_write_lock("audit_log"), which coordinates
+across processes/replicas for real when REDIS_URL is set (falling back to
+a process-local asyncio.Lock, same as before, when it isn't). Still
+assumes every replica shares the same OPENBOUNCER_AUDIT_LOG_PATH -- the
+lock only prevents two replicas racing on the *same* file, it doesn't make
+each replica's own local file the same file. See the README's
+"Multi-replica deployments" section.
 
 Tamper-evident: every entry is hash-chained to the one before it (see
 app.core.hash_chain for the mechanism, and what it does/doesn't prove).
@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.atomic_write import atomic_write_text
+from app.core.distributed_lock import admin_write_lock
 from app.core.hash_chain import ChainVerificationResult, compute_hash, previous_hash, verify_log_file, write_checkpoint
 
 DEFAULT_AUDIT_LOG_PATH = Path(__file__).resolve().parents[2] / "config" / "audit_log.jsonl"
@@ -102,7 +103,7 @@ def _audit_log_path() -> Path:
     return Path(explicit) if explicit else DEFAULT_AUDIT_LOG_PATH
 
 
-def record_entry(
+async def record_entry(
     *,
     actor_key_id: str,
     resource_type: str,
@@ -118,37 +119,40 @@ def record_entry(
     reload validation) -- see the module docstring -- so the log never
     describes a change that didn't really happen.
 
-    A plain synchronous file append with no `await` in between construction
-    and the write, so it's safe without an extra lock: nothing else can
-    interleave mid-call within a single asyncio event loop (matches the
-    reasoning already used for RequestLoggingMiddleware's Prometheus
-    counters). _trim_if_needed() below, called at the end of this
-    function, is synchronous for the same reason -- the whole append+trim
-    sequence is atomic with respect to the rest of the event loop even
-    though it isn't behind an explicit lock.
+    Wrapped in its own admin_write_lock("audit_log") -- not just whatever
+    resource-specific lock the caller already holds (app.auth.keys'
+    "api_keys", etc.) -- because every resource writes into this *same*
+    physical file/hash chain. Two concurrent writes to two *different*
+    resources (e.g. one editing keys, one editing prompt-injection config)
+    are serialized against each other by their own separate locks, but
+    both still append to audit_log.jsonl, so this file needs a lock of its
+    own regardless of which resource lock the caller is holding. See
+    app.core.distributed_lock's module docstring for what this protects
+    against and what happens without REDIS_URL configured.
     """
     log_path = _audit_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    prev_hash = previous_hash(log_path)
-    entry = AuditEntry(
-        id=uuid.uuid4().hex,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        actor_key_id=actor_key_id,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        action=action,
-        summary=summary,
-        path=str(path),
-        before=before,
-        after=after,
-        prev_hash=prev_hash,
-    )
-    payload = {k: v for k, v in asdict(entry).items() if k not in ("hash", "prev_hash")}
-    entry = dataclasses.replace(entry, hash=compute_hash(prev_hash, payload))
-    with open(log_path, "a") as f:
-        f.write(json.dumps(asdict(entry)) + "\n")
-    _trim_if_needed(log_path)
-    return entry
+    async with admin_write_lock("audit_log"):
+        prev_hash = previous_hash(log_path)
+        entry = AuditEntry(
+            id=uuid.uuid4().hex,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            actor_key_id=actor_key_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            action=action,
+            summary=summary,
+            path=str(path),
+            before=before,
+            after=after,
+            prev_hash=prev_hash,
+        )
+        payload = {k: v for k, v in asdict(entry).items() if k not in ("hash", "prev_hash")}
+        entry = dataclasses.replace(entry, hash=compute_hash(prev_hash, payload))
+        with open(log_path, "a") as f:
+            f.write(json.dumps(asdict(entry)) + "\n")
+        _trim_if_needed(log_path)
+        return entry
 
 
 def _trim_if_needed(log_path: Path) -> None:
@@ -216,7 +220,18 @@ def get_entry(entry_id: str) -> AuditEntry | None:
     return None
 
 
-def revert_entry(entry_id: str, *, actor_key_id: str) -> tuple[AuditEntry, AuditEntry]:
+def _lock_name_for_resource(resource_type: str, resource_id: str | None) -> str:
+    """Matches the lock names app.auth.keys/app.guardrails.prompt_injection/
+    app.guardrails.output_leak/app.guardrails.editable_config each acquire
+    for their own writes -- see admin_write_lock_name() in each of those
+    modules. revert_entry needs the *same* name so a revert can't race a
+    fresh admin write to the same resource on another replica."""
+    if resource_type == "guardrails_config" and resource_id:
+        return f"guardrails_config:{resource_id}"
+    return resource_type
+
+
+async def revert_entry(entry_id: str, *, actor_key_id: str) -> tuple[AuditEntry, AuditEntry]:
     """Writes `entry_id`'s `before` text back to its file and records a new
     "revert" audit entry describing that write (the log is append-only --
     a revert is a new event, not an edit to history). Returns
@@ -228,23 +243,31 @@ def revert_entry(entry_id: str, *, actor_key_id: str) -> tuple[AuditEntry, Audit
     cache) -- callers (see app/api/routes/admin.py) do that based on the
     returned original entry's resource_type/resource_id, the same way
     every other admin write endpoint already does its own invalidation.
+
+    Wrapped in the same resource-specific lock create_key/update_key_fields/
+    etc. use for their own writes (see _lock_name_for_resource) -- a revert
+    writes to the same file those functions do, so it needs the same
+    cross-replica coordination they get, even though it's invoked from a
+    dedicated endpoint rather than going through any of those functions.
     """
     original = get_entry(entry_id)
     if original is None:
         raise KeyError(entry_id)
 
     path = Path(original.path)
-    current_text = path.read_text() if path.exists() else ""
-    atomic_write_text(path, original.before)
+    lock_name = _lock_name_for_resource(original.resource_type, original.resource_id)
+    async with admin_write_lock(lock_name):
+        current_text = path.read_text() if path.exists() else ""
+        atomic_write_text(path, original.before)
 
-    revert = record_entry(
-        actor_key_id=actor_key_id,
-        resource_type=original.resource_type,
-        resource_id=original.resource_id,
-        action="revert",
-        summary=f"Reverted {original.id} ({original.action}: {original.summary})",
-        path=path,
-        before=current_text,
-        after=original.before,
-    )
+        revert = await record_entry(
+            actor_key_id=actor_key_id,
+            resource_type=original.resource_type,
+            resource_id=original.resource_id,
+            action="revert",
+            summary=f"Reverted {original.id} ({original.action}: {original.summary})",
+            path=path,
+            before=current_text,
+            after=original.before,
+        )
     return original, revert

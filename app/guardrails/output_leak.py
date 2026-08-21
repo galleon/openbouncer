@@ -30,7 +30,6 @@ rather than one generic token, again matching OpenRouter's documented
 behavior -- see redaction_token().
 """
 
-import asyncio
 import dataclasses
 import enum
 import json
@@ -45,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
+from app.core.distributed_lock import admin_write_lock
 from app.schemas.chat import ChatCompletionResponse, TextContentPart
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "output_leak.yaml"
@@ -484,10 +484,13 @@ def get_output_leak_config() -> OutputLeakConfig:
     return load_output_leak_config()
 
 
-_write_lock = asyncio.Lock()
+# Same reasoning (and cross-replica coordination via REDIS_URL, see
+# app.core.distributed_lock) as app.auth.keys._WRITE_LOCK_NAME /
+# app.guardrails.prompt_injection._WRITE_LOCK_NAME.
+_WRITE_LOCK_NAME = "output_leak"
 
 
-def _persist_config(config: OutputLeakConfig, *, actor_key_id: str, summary: str) -> None:
+async def _persist_config(config: OutputLeakConfig, *, actor_key_id: str, summary: str) -> None:
     path = _resolve_config_path()
     before = (
         path.read_text()
@@ -496,7 +499,7 @@ def _persist_config(config: OutputLeakConfig, *, actor_key_id: str, summary: str
     )
     new_yaml = yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False)
     atomic_write_text(path, new_yaml)
-    record_audit_entry(
+    await record_audit_entry(
         actor_key_id=actor_key_id,
         resource_type="output_leak",
         resource_id=None,
@@ -527,7 +530,7 @@ async def update_output_leak_config(
     given, is a full replacement (there's no natural per-entry merge key
     to partially update by, unlike the fixed category enum).
     """
-    async with _write_lock:
+    async with admin_write_lock(_WRITE_LOCK_NAME):
         current = load_output_leak_config()
         updates: dict[str, object] = {}
         if enabled is not None:
@@ -542,7 +545,7 @@ async def update_output_leak_config(
             updates["custom_patterns"] = custom_patterns
 
         updated = current.model_copy(update=updates)
-        _persist_config(
+        await _persist_config(
             updated,
             actor_key_id=actor_key_id,
             summary=f"Updated output-leak config: fields={sorted(updates.keys())}",

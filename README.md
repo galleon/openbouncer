@@ -598,38 +598,39 @@ counter/cooldown are all safe to run with multiple gateway replicas --
 that's exactly what their shared `REDIS_URL` backing exists for, and
 Redis genuinely coordinates across processes.
 
-**Admin writes are a different story.** `config/api_keys.yaml`,
-`config/prompt_injection.yaml`, guardrails config edits, and
-`config/audit_log.jsonl` are all plain files on local disk, written with
-either an in-process `asyncio.Lock` (`app.auth.keys`,
-`app.guardrails.prompt_injection`) or an equivalent no-`await`-in-the-write-path
-guarantee (`app.guardrails.editable_config`, `app.core.audit`) -- both of
-which serialize concurrent writes *within one process*, and neither of
-which is a filesystem-level lock (`flock`/`fcntl`) or coordinates across
-processes at all. Running more than one gateway replica means:
+**Admin writes need the same `REDIS_URL`, plus a shared `config/`.**
+`config/api_keys.yaml`, `config/prompt_injection.yaml`, guardrails config
+edits, and the two hash-chained logs (`config/audit_log.jsonl`,
+`config/guardrail_events.jsonl`) are still plain files on local disk, but
+every write to them now goes through
+`app.core.distributed_lock.admin_write_lock(name)` -- one named lock per
+resource (`api_keys`, `prompt_injection`, `output_leak`,
+`guardrails_config:{config_id}`, `audit_log`, `guardrail_events`), backed
+by a real Redis-coordinated lock when `REDIS_URL` is set, falling back to
+the same process-local `asyncio.Lock` as before when it isn't. Two things
+are both still required for correctness with more than one replica:
 
-- **If replicas don't share these files** (each has its own local
-  `config/`), they silently diverge: a key created via replica A doesn't
-  exist on replica B until something else syncs the files, and each
-  replica's `/api/admin/audit-log` shows a different, incomplete history.
-  This is the default under `docker-compose.admin.yml` with more than one
-  `gateway` container -- there's no shared volume set up for that case.
-- **If replicas do share these files** (e.g. a common NFS/shared volume),
-  two admin writes landing on two different replicas at the same moment
-  aren't coordinated by either process's lock and can race -- e.g. two
-  concurrent `PATCH`es to the same key on two different replicas can both
-  read the pre-change file and the second write silently clobbers the
-  first's update, the same failure mode the in-process locks exist to
-  prevent for a single replica.
+- **A shared `config/` volume across replicas.** The lock only prevents
+  two replicas from racing on the *same* file -- it does nothing if each
+  replica has its own local `config/` and never sees the other's writes at
+  all. This isn't set up by default under `docker-compose.admin.yml` with
+  more than one `gateway` container; without it, replicas still silently
+  diverge regardless of locking.
+- **`REDIS_URL` set on every replica.** Without it, `admin_write_lock`
+  degrades to a process-local `asyncio.Lock` -- correct for a single
+  replica (unchanged from before), but back to the original race condition
+  across two.
 
-Until this has a real fix (centralizing this state in something that
-actually coordinates writes -- e.g. Redis or a database, the way rate
-limiting/usage accounting already do -- is the likely direction, but is a
-larger change than anything else in this section), the practical
-guidance for a multi-replica deployment is: route all `/api/admin/*`
-traffic to one designated replica (or a separate single-instance admin
-service), rather than treating admin writes as safe to load-balance
-across replicas the way `/v1/*` traffic is.
+With both in place, concurrent admin writes across replicas are actually
+serialized, including the two hash-chained logs' append ordering (so
+[verify](#tamper-evident-audit-log) doesn't misreport a genuine
+multi-replica race as tampering). `admin_write_lock` fails **closed**, not
+open, on a Redis error -- unlike rate limiting/usage/budget/alerting, an
+admin write racing unprotected is a silent lost update, not a rare
+inconvenience, so a lock that can't actually coordinate raises
+`AdminWriteLockUnavailableError` (surfaced as `503
+admin_write_lock_unavailable`) rather than silently letting the write
+through unprotected.
 
 ## Observability
 

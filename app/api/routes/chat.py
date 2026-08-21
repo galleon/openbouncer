@@ -146,7 +146,7 @@ async def _apply_output_leak_guardrail(
         return response
 
     response, action, matches = apply_output_leak_action(response, results)
-    _record_output_leak_matches(matches, key_id=key_id, model=response.model, action=action, streaming=False)
+    await _record_output_leak_matches(matches, key_id=key_id, model=response.model, action=action, streaming=False)
 
     if action is OutputLeakAction.BLOCK:
         await _maybe_alert_on_block(alert_tracker, key_id, "output_leak")
@@ -162,7 +162,7 @@ async def _apply_output_leak_guardrail(
     return response
 
 
-def _record_output_leak_matches(
+async def _record_output_leak_matches(
     matches: list, *, key_id: str, model: str, action: OutputLeakAction, streaming: bool
 ) -> None:
     """Shared by both the non-streaming (_apply_output_leak_guardrail) and
@@ -179,7 +179,7 @@ def _record_output_leak_matches(
     request_id = get_request_id()
     for match in matches:
         OUTPUT_LEAK_MATCHES_TOTAL.labels(category=match.category.value).inc()
-        record_guardrail_event(
+        await record_guardrail_event(
             request_id=request_id,
             key_id=key_id,
             guardrail="output_leak",
@@ -246,7 +246,7 @@ async def _with_output_leak_scan(
             accumulated.append(extract_stream_delta_text(chunk))
             yield chunk
         matches = scan_output_leak_text("".join(accumulated), ol_config)
-        _record_output_leak_matches(
+        await _record_output_leak_matches(
             matches, key_id=key_id, model=model, action=resolve_output_leak_action(matches), streaming=True
         )
         return
@@ -259,7 +259,7 @@ async def _with_output_leak_scan(
     action = resolve_output_leak_action(matches)
 
     if action is OutputLeakAction.BLOCK:
-        _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
+        await _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
         await _maybe_alert_on_block(alert_tracker, key_id, "output_leak")
         yield format_sse_error(
             OpenAIError(
@@ -273,7 +273,7 @@ async def _with_output_leak_scan(
         return
 
     if action is OutputLeakAction.REDACT:
-        _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
+        await _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
         redacted_text = redact_output_leak_text(text, matches)
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
@@ -283,7 +283,7 @@ async def _with_output_leak_scan(
         return
 
     # FLAG or no match: relay the buffered original chunks unmodified.
-    _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
+    await _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
     for chunk in buffered:
         yield chunk
 
@@ -386,7 +386,7 @@ async def create_chat_completion(
                 pi_request_id = get_request_id()
                 for match in pi_matches:
                     PROMPT_INJECTION_MATCHES_TOTAL.labels(category=match.category.value, via=match.via).inc()
-                    record_guardrail_event(
+                    await record_guardrail_event(
                         request_id=pi_request_id,
                         key_id=auth.key_id,
                         guardrail="prompt_injection",

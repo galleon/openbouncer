@@ -28,6 +28,7 @@ from app.auth.keys import (
 from app.core.audit import list_entries as list_audit_entries
 from app.core.audit import revert_entry as revert_audit_entry_by_id
 from app.core.audit import verify_chain as verify_audit_chain
+from app.core.distributed_lock import AdminWriteLockUnavailableError
 from app.core.errors import OpenAIError
 from app.core.guardrail_events import list_events as list_guardrail_events
 from app.core.guardrail_events import verify_chain as verify_guardrail_events_chain
@@ -97,6 +98,16 @@ from app.schemas.admin import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _admin_write_lock_error(exc: AdminWriteLockUnavailableError) -> OpenAIError:
+    # Shared by every admin write endpoint below -- see
+    # app.core.distributed_lock.AdminWriteLockUnavailableError's docstring
+    # for when this actually fires (REDIS_URL set, Redis unreachable or
+    # another replica holding the lock past its timeout).
+    return OpenAIError(
+        str(exc), status_code=503, error_type="api_error", code="admin_write_lock_unavailable"
+    )
 
 
 def _to_admin_key_item(record) -> AdminKeyItem:
@@ -198,6 +209,8 @@ async def create_key_endpoint(
         raise OpenAIError(
             str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
         ) from exc
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s created key_id=%s is_admin=%s [request_id=%s]",
@@ -240,6 +253,8 @@ async def update_key_endpoint(
             error_type="invalid_request_error",
             code="cannot_remove_last_admin_key",
         ) from None
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s updated key_id=%s fields=%s [request_id=%s]",
@@ -269,6 +284,8 @@ async def rotate_key_endpoint(
         raise OpenAIError(
             str(exc), status_code=409, error_type="api_error", code="key_store_not_file_backed"
         ) from exc
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s rotated key_id=%s [request_id=%s]",
@@ -305,6 +322,8 @@ async def delete_key_endpoint(
             error_type="invalid_request_error",
             code="cannot_remove_last_admin_key",
         ) from None
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s deleted key_id=%s [request_id=%s]",
@@ -358,6 +377,8 @@ async def update_key_guardrails_configs(
             error_type="api_error",
             code="key_store_not_file_backed",
         ) from exc
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s granted key_id=%s guardrails configs=%s [request_id=%s]",
@@ -441,7 +462,7 @@ async def update_guardrails_config(
 
     config_dir = Path(catalog.config_store_path) / config_id
     try:
-        values = write_editable_sections(
+        values = await write_editable_sections(
             config_dir, config_id, body.sections, guardrails_service, actor_key_id=auth.key_id
         )
     except ValueError as exc:
@@ -459,6 +480,8 @@ async def update_guardrails_config(
             error_type="api_error",
             code="guardrails_config_invalid",
         ) from exc
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s edited guardrails config_id=%s [request_id=%s]",
@@ -538,14 +561,17 @@ async def update_prompt_injection_config_endpoint(
                 ) from None
             categories[category] = action
 
-    updated = await update_prompt_injection_config(
-        actor_key_id=auth.key_id,
-        enabled=fields.get("enabled"),
-        scope=scope,
-        detect_evasions=fields.get("detect_evasions"),
-        allow_list=fields.get("allow_list"),
-        categories=categories,
-    )
+    try:
+        updated = await update_prompt_injection_config(
+            actor_key_id=auth.key_id,
+            enabled=fields.get("enabled"),
+            scope=scope,
+            detect_evasions=fields.get("detect_evasions"),
+            allow_list=fields.get("allow_list"),
+            categories=categories,
+        )
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s updated prompt-injection config fields=%s [request_id=%s]",
@@ -662,13 +688,16 @@ async def update_output_leak_config_endpoint(
                 code="invalid_custom_pattern",
             ) from exc
 
-    updated = await update_output_leak_config(
-        actor_key_id=auth.key_id,
-        enabled=fields.get("enabled"),
-        allow_list=fields.get("allow_list"),
-        categories=categories,
-        custom_patterns=custom_patterns,
-    )
+    try:
+        updated = await update_output_leak_config(
+            actor_key_id=auth.key_id,
+            enabled=fields.get("enabled"),
+            allow_list=fields.get("allow_list"),
+            categories=categories,
+            custom_patterns=custom_patterns,
+        )
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     logger.info(
         "admin key_id=%s updated output-leak config fields=%s [request_id=%s]",
@@ -824,7 +853,7 @@ async def revert_audit_log_entry(
     auth: AuthContext = Depends(require_full_admin),
 ) -> RevertAuditEntryResponse:
     try:
-        original, revert = revert_audit_entry_by_id(entry_id, actor_key_id=auth.key_id)
+        original, revert = await revert_audit_entry_by_id(entry_id, actor_key_id=auth.key_id)
     except KeyError:
         raise OpenAIError(
             f"Unknown audit log entry `{entry_id}`.",
@@ -832,6 +861,8 @@ async def revert_audit_log_entry(
             error_type="invalid_request_error",
             code="audit_entry_not_found",
         ) from None
+    except AdminWriteLockUnavailableError as exc:
+        raise _admin_write_lock_error(exc) from exc
 
     # Invalidate whichever in-process cache actually holds this resource's
     # state -- same as every write endpoint above already does for its own

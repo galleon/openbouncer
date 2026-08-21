@@ -21,6 +21,7 @@ import yaml
 
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
+from app.core.distributed_lock import admin_write_lock
 from app.guardrails.service import GuardrailsService
 
 # Optional dependency (see pyproject.toml's "nemo" extra) -- only needed for
@@ -238,7 +239,7 @@ def read_editable_sections(config_dir: Path, config_id: str) -> dict[str, list[s
     return result
 
 
-def write_editable_sections(
+async def write_editable_sections(
     config_dir: Path,
     config_id: str,
     updates: dict[str, list[str]],
@@ -254,13 +255,15 @@ def write_editable_sections(
     GuardrailsConfigParseError if the file's shape doesn't match or the
     post-write reload fails.
 
-    Unlike app.auth.keys/app.guardrails.prompt_injection, this function
-    doesn't take an explicit asyncio.Lock -- it doesn't need one, since
-    (like app.core.audit.record_entry) its entire body has no `await`
-    point, so two concurrent calls in this process can never interleave
-    mid-write regardless. That guarantee is process-local, though -- see
-    the README's "Multi-replica deployments" section for why it doesn't
-    extend to two gateway replicas writing the same file at once.
+    The read-modify-write region (from the initial file read through the
+    audit record) is wrapped in
+    admin_write_lock(f"guardrails_config:{config_id}") -- one lock per
+    config_id, not a single lock shared across every preset, so concurrent
+    edits to two *different* presets never wait on each other. Coordinates
+    across gateway replicas for real when REDIS_URL is set -- see
+    app.core.distributed_lock's module docstring. Input validation above
+    that (config_id/updates shape) doesn't touch shared state, so it stays
+    outside the lock.
     """
     sections = EDITABLE_CONFIG_MANIFEST.get(config_id)
     if sections is None:
@@ -274,65 +277,66 @@ def write_editable_sections(
 
     validated = {field: _validate_items(items) for field, items in updates.items()}
 
-    config_path = config_dir / "config.yml"
-    original_text = config_path.read_text()
-    text = original_text
-    cursor = 0
-    for section in sections:
-        _bullets, start, end, indent = _find_bullets(
-            text, section.task_anchor, section.header_line, start=cursor
+    async with admin_write_lock(f"guardrails_config:{config_id}"):
+        config_path = config_dir / "config.yml"
+        original_text = config_path.read_text()
+        text = original_text
+        cursor = 0
+        for section in sections:
+            _bullets, start, end, indent = _find_bullets(
+                text, section.task_anchor, section.header_line, start=cursor
+            )
+            text, cursor = _splice_bullets(text, start, end, indent, validated[section.field])
+
+        try:
+            yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise GuardrailsConfigParseError(f"Splice produced invalid YAML: {exc}") from exc
+
+        reread: dict[str, list[str]] = {}
+        reread_cursor = 0
+        for section in sections:
+            bullets, _start, end, _indent = _find_bullets(
+                text, section.task_anchor, section.header_line, start=reread_cursor
+            )
+            reread[section.field] = bullets
+            reread_cursor = end
+        if reread != validated:
+            raise GuardrailsConfigParseError(
+                "Internal error: splice round-trip mismatch, aborting write."
+            )
+
+        if RailsConfig is None:
+            # Known upfront, before anything is written -- no partial/unvalidated
+            # write to roll back, unlike the reload failure below.
+            raise GuardrailsConfigParseError(
+                "Cannot validate this edit: the optional 'nemoguardrails' package "
+                f"isn't installed in this deployment ({_NEMOGUARDRAILS_IMPORT_ERROR}). "
+                "Install it with `uv sync --extra nemo` to enable editing nemo_library "
+                "guardrails configs."
+            )
+
+        atomic_write_text(config_path, text)
+
+        try:
+            RailsConfig.from_path(str(config_dir))
+        except Exception as exc:
+            atomic_write_text(config_path, original_text)
+            raise GuardrailsConfigParseError(
+                f"New config failed to load, rolled back: {exc}"
+            ) from exc
+
+        # Recorded only after the write above is confirmed valid (reload
+        # succeeded) -- see app.core.audit's module docstring for why.
+        await record_audit_entry(
+            actor_key_id=actor_key_id,
+            resource_type="guardrails_config",
+            resource_id=config_id,
+            action="update_guardrails_config",
+            summary=f"Updated guardrails config '{config_id}': sections={sorted(updates.keys())}",
+            path=config_path,
+            before=original_text,
+            after=text,
         )
-        text, cursor = _splice_bullets(text, start, end, indent, validated[section.field])
-
-    try:
-        yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise GuardrailsConfigParseError(f"Splice produced invalid YAML: {exc}") from exc
-
-    reread: dict[str, list[str]] = {}
-    reread_cursor = 0
-    for section in sections:
-        bullets, _start, end, _indent = _find_bullets(
-            text, section.task_anchor, section.header_line, start=reread_cursor
-        )
-        reread[section.field] = bullets
-        reread_cursor = end
-    if reread != validated:
-        raise GuardrailsConfigParseError(
-            "Internal error: splice round-trip mismatch, aborting write."
-        )
-
-    if RailsConfig is None:
-        # Known upfront, before anything is written -- no partial/unvalidated
-        # write to roll back, unlike the reload failure below.
-        raise GuardrailsConfigParseError(
-            "Cannot validate this edit: the optional 'nemoguardrails' package "
-            f"isn't installed in this deployment ({_NEMOGUARDRAILS_IMPORT_ERROR}). "
-            "Install it with `uv sync --extra nemo` to enable editing nemo_library "
-            "guardrails configs."
-        )
-
-    atomic_write_text(config_path, text)
-
-    try:
-        RailsConfig.from_path(str(config_dir))
-    except Exception as exc:
-        atomic_write_text(config_path, original_text)
-        raise GuardrailsConfigParseError(
-            f"New config failed to load, rolled back: {exc}"
-        ) from exc
-
-    # Recorded only after the write above is confirmed valid (reload
-    # succeeded) -- see app.core.audit's module docstring for why.
-    record_audit_entry(
-        actor_key_id=actor_key_id,
-        resource_type="guardrails_config",
-        resource_id=config_id,
-        action="update_guardrails_config",
-        summary=f"Updated guardrails config '{config_id}': sections={sorted(updates.keys())}",
-        path=config_path,
-        before=original_text,
-        after=text,
-    )
-    guardrails_service.invalidate(config_id)
-    return reread
+        guardrails_service.invalidate(config_id)
+        return reread

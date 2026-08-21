@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import os
 import re
@@ -12,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
+from app.core.distributed_lock import admin_write_lock
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "api_keys.yaml"
 
@@ -259,10 +259,10 @@ KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Serializes read-modify-write across concurrent admin requests -- without
 # this, two overlapping PATCHes could both read the pre-change file and the
-# second write would clobber the first's update. Process-local: this
-# doesn't coordinate two gateway replicas writing the same api_keys.yaml at
-# once -- see the README's "Multi-replica deployments" section.
-_write_lock = asyncio.Lock()
+# second write would clobber the first's update. Coordinates across
+# gateway replicas too, for real, when REDIS_URL is set -- see
+# app.core.distributed_lock's module docstring.
+_WRITE_LOCK_NAME = "api_keys"
 
 
 def _writable_path() -> Path:
@@ -284,7 +284,7 @@ def _load_writable_config() -> APIKeyStoreConfig:
     return APIKeyStoreConfig(**(yaml.safe_load(raw) or {}))
 
 
-def _persist_config(
+async def _persist_config(
     config: APIKeyStoreConfig, *, actor_key_id: str, action: str, summary: str
 ) -> None:
     path = _writable_path()
@@ -297,7 +297,7 @@ def _persist_config(
     atomic_write_text(path, new_yaml)
     # Recorded only after the write above succeeds -- see app.core.audit's
     # module docstring for why.
-    record_audit_entry(
+    await record_audit_entry(
         actor_key_id=actor_key_id,
         resource_type="api_keys",
         resource_id=None,
@@ -321,12 +321,12 @@ async def create_key(record: APIKeyRecord, *, actor_key_id: str) -> APIKeyRecord
     KeyAlreadyExistsError if record.id is already taken, AdminPersistenceError
     if the store isn't file-backed.
     """
-    async with _write_lock:
+    async with admin_write_lock(_WRITE_LOCK_NAME):
         config = _load_writable_config()
         if any(k.id == record.id for k in config.keys):
             raise KeyAlreadyExistsError(record.id)
         new_config = APIKeyStoreConfig(keys=[*config.keys, record])
-        _persist_config(
+        await _persist_config(
             new_config,
             actor_key_id=actor_key_id,
             action="create_key",
@@ -352,7 +352,7 @@ async def update_key_fields(
     (rotate_key, update_key_allowed_guardrails_configs) record that in the
     audit log instead of a generic "updated fields: [...]".
     """
-    async with _write_lock:
+    async with admin_write_lock(_WRITE_LOCK_NAME):
         config = _load_writable_config()
         existing = next((k for k in config.keys if k.id == key_id), None)
         if existing is None:
@@ -366,7 +366,7 @@ async def update_key_fields(
         # Re-validate the whole store (not just the one record) before
         # writing, so a bug here can't persist an inconsistent file.
         new_config = APIKeyStoreConfig(keys=new_keys)
-        _persist_config(
+        await _persist_config(
             new_config,
             actor_key_id=actor_key_id,
             action=action,
@@ -381,7 +381,7 @@ async def delete_key(key_id: str, *, actor_key_id: str) -> None:
     isn't file-backed, LastKeysWriteAdminError if it's the last key with
     `keys:write` admin access.
     """
-    async with _write_lock:
+    async with admin_write_lock(_WRITE_LOCK_NAME):
         config = _load_writable_config()
         existing = next((k for k in config.keys if k.id == key_id), None)
         if existing is None:
@@ -391,7 +391,7 @@ async def delete_key(key_id: str, *, actor_key_id: str) -> None:
         ):
             raise LastKeysWriteAdminError(key_id)
         new_keys = [k for k in config.keys if k.id != key_id]
-        _persist_config(
+        await _persist_config(
             APIKeyStoreConfig(keys=new_keys),
             actor_key_id=actor_key_id,
             action="delete_key",

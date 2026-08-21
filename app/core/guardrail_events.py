@@ -11,15 +11,25 @@ app/api/routes/admin.py, surfaced in the Activity dashboard.
 
 Same JSONL-append-plus-trim shape as app.core.audit (see that module's
 docstring for the reasoning: no separate snapshot store, cheap to check on
-every write, single-writer/single-process assumption, same "Multi-replica
-deployments" caveat as the README documents for the audit log). Kept as a
-separate file and a separate module from app.core.audit on purpose: these
-are two different logs with different audiences (admin config changes vs.
-per-request guardrail activity), different volume (this one is written on
-the hot request path, potentially once per flagged request, not just on
-rare admin writes), and no revert semantics -- reusing audit.py's
-AuditEntry/record_entry would conflate "what an admin changed" with "what
-a guardrail did to someone else's traffic."
+every write). Kept as a separate file and a separate module from
+app.core.audit on purpose: these are two different logs with different
+audiences (admin config changes vs. per-request guardrail activity),
+different volume (this one is written on the hot request path, potentially
+once per flagged request, not just on rare admin writes), and no revert
+semantics -- reusing audit.py's AuditEntry/record_entry would conflate
+"what an admin changed" with "what a guardrail did to someone else's
+traffic."
+
+Multi-replica: record_event()'s append+trim is wrapped in
+app.core.distributed_lock.admin_write_lock("guardrail_events"), same
+mechanism app.core.audit uses, so this log's hash chain (see "Tamper-
+evident" below) stays valid under concurrent replicas instead of two
+replicas racing to claim the same prev_hash. This is the one place in the
+codebase that mechanism runs on the hot request path rather than a rare
+admin write -- correctness came first here; if lock acquisition against
+Redis turns out to be a measurable per-request cost under real load, a
+lighter-weight sequence-claiming primitive is the targeted follow-up, not
+a reason to leave this log uncoordinated.
 
 Snippet privacy: `snippet` never contains a *raw* output-leak match (an
 actual email/SSN/API key) -- callers pass the category's own redaction
@@ -59,6 +69,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.atomic_write import atomic_write_text
+from app.core.distributed_lock import admin_write_lock
 from app.core.hash_chain import ChainVerificationResult, compute_hash, previous_hash, verify_log_file, write_checkpoint
 
 DEFAULT_EVENTS_PATH = Path(__file__).resolve().parents[2] / "config" / "guardrail_events.jsonl"
@@ -134,7 +145,7 @@ def _events_path() -> Path:
     return Path(explicit) if explicit else DEFAULT_EVENTS_PATH
 
 
-def record_event(
+async def record_event(
     *,
     request_id: str | None,
     key_id: str,
@@ -146,10 +157,9 @@ def record_event(
     via: str | None,
     snippet: str,
 ) -> GuardrailEvent:
-    """Appends one entry. Plain synchronous file append with no `await` in
-    between construction and the write -- same "safe without an explicit
-    lock" reasoning as app.core.audit.record_entry (nothing else can
-    interleave mid-call within a single asyncio event loop).
+    """Appends one entry, holding admin_write_lock("guardrail_events") for
+    the duration -- see the module docstring's "Multi-replica" paragraph
+    for why this log needs it even on the hot request path.
 
     Snippet redaction is enforced here, centrally, rather than left to each
     caller in app/api/routes/chat.py to remember -- this is the one place
@@ -160,27 +170,28 @@ def record_event(
     effective_snippet = snippet if _log_prompt_content() else f"[{category}]"
     path = _events_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    prev_hash = previous_hash(path)
-    event = GuardrailEvent(
-        id=uuid.uuid4().hex,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        request_id=request_id,
-        key_id=key_id,
-        guardrail=guardrail,
-        model=model,
-        category=category,
-        pattern_name=pattern_name,
-        action=action,
-        via=via,
-        snippet=effective_snippet[:_MAX_SNIPPET_LENGTH],
-        prev_hash=prev_hash,
-    )
-    payload = {k: v for k, v in asdict(event).items() if k not in ("hash", "prev_hash")}
-    event = dataclasses.replace(event, hash=compute_hash(prev_hash, payload))
-    with open(path, "a") as f:
-        f.write(json.dumps(asdict(event)) + "\n")
-    _trim_if_needed(path)
-    return event
+    async with admin_write_lock("guardrail_events"):
+        prev_hash = previous_hash(path)
+        event = GuardrailEvent(
+            id=uuid.uuid4().hex,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            request_id=request_id,
+            key_id=key_id,
+            guardrail=guardrail,
+            model=model,
+            category=category,
+            pattern_name=pattern_name,
+            action=action,
+            via=via,
+            snippet=effective_snippet[:_MAX_SNIPPET_LENGTH],
+            prev_hash=prev_hash,
+        )
+        payload = {k: v for k, v in asdict(event).items() if k not in ("hash", "prev_hash")}
+        event = dataclasses.replace(event, hash=compute_hash(prev_hash, payload))
+        with open(path, "a") as f:
+            f.write(json.dumps(asdict(event)) + "\n")
+        _trim_if_needed(path)
+        return event
 
 
 def _trim_if_needed(path: Path) -> None:

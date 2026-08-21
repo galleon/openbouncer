@@ -15,7 +15,6 @@ support -- deliberately zero imports from app.guardrails.service/catalog/
 editable_config, no coupling to NeMo.
 """
 
-import asyncio
 import base64
 import binascii
 import dataclasses
@@ -31,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
+from app.core.distributed_lock import admin_write_lock
 from app.schemas.chat import ChatCompletionRequest, ChatMessage, TextContentPart
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "prompt_injection.yaml"
@@ -483,13 +483,14 @@ def get_prompt_injection_config() -> PromptInjectionConfig:
     return load_prompt_injection_config()
 
 
-# Serializes read-modify-write across concurrent admin requests, same
-# reasoning (and same process-local-only scope -- see the README's
-# "Multi-replica deployments" section) as app.auth.keys._write_lock.
-_write_lock = asyncio.Lock()
+# Serializes read-modify-write across concurrent admin requests. Coordinates
+# across gateway replicas too, for real, when REDIS_URL is set -- see
+# app.core.distributed_lock's module docstring (and app.auth.keys' matching
+# _WRITE_LOCK_NAME).
+_WRITE_LOCK_NAME = "prompt_injection"
 
 
-def _persist_config(config: PromptInjectionConfig, *, actor_key_id: str, summary: str) -> None:
+async def _persist_config(config: PromptInjectionConfig, *, actor_key_id: str, summary: str) -> None:
     path = _resolve_config_path()
     before = (
         path.read_text()
@@ -500,7 +501,7 @@ def _persist_config(config: PromptInjectionConfig, *, actor_key_id: str, summary
     atomic_write_text(path, new_yaml)
     # Recorded only after the write above succeeds -- see app.core.audit's
     # module docstring for why.
-    record_audit_entry(
+    await record_audit_entry(
         actor_key_id=actor_key_id,
         resource_type="prompt_injection",
         resource_id=None,
@@ -553,7 +554,7 @@ async def update_prompt_injection_config(
     Every other field is a full replacement, same as
     app.auth.keys.update_key_fields.
     """
-    async with _write_lock:
+    async with admin_write_lock(_WRITE_LOCK_NAME):
         current = load_prompt_injection_config()
         updates: dict[str, object] = {}
         if enabled is not None:
@@ -570,7 +571,7 @@ async def update_prompt_injection_config(
             updates["categories"] = merged_categories
 
         updated = current.model_copy(update=updates)
-        _persist_config(
+        await _persist_config(
             updated,
             actor_key_id=actor_key_id,
             summary=f"Updated prompt-injection config: fields={sorted(updates.keys())}",
