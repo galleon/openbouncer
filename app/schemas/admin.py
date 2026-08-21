@@ -17,6 +17,8 @@ class AdminKeyItem(BaseModel):
     # None means unlimited -- see APIKeyRecord.token_budget_daily/_monthly.
     token_budget_daily: int | None
     token_budget_monthly: int | None
+    # None means no sovereignty constraint -- see APIKeyRecord.required_sovereignty.
+    required_sovereignty: dict[str, str] | None
     # key_hash intentionally omitted -- no reason to expose hash material
     # over the API even though it isn't reversible to the raw key.
 
@@ -48,6 +50,9 @@ class CreateKeyRequest(BaseModel):
     # None (the default) means unlimited -- see APIKeyRecord.token_budget_daily/_monthly.
     token_budget_daily: int | None = Field(default=None, gt=0)
     token_budget_monthly: int | None = Field(default=None, gt=0)
+    # None (the default) means no sovereignty constraint -- see
+    # APIKeyRecord.required_sovereignty.
+    required_sovereignty: dict[str, str] | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -76,6 +81,8 @@ class UpdateKeyRequest(BaseModel):
     # falsiness of the value.
     token_budget_daily: int | None = Field(default=None, gt=0)
     token_budget_monthly: int | None = Field(default=None, gt=0)
+    # Same explicit-null-clears-it semantics as the budget fields above.
+    required_sovereignty: dict[str, str] | None = None
 
 
 class RotateKeyResponse(BaseModel):

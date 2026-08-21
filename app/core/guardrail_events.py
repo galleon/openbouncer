@@ -27,8 +27,21 @@ placeholder (e.g. "[EMAIL]") instead, so this log can't become a second
 copy of the very data the output-leak guardrail exists to keep from
 leaking. Prompt-injection matches are the adversarial *input* phrase
 itself (e.g. "ignore all previous instructions"), not PII, so those are
-logged as-is -- that's the content a reviewer actually needs to see to
-tell a real attack from a false positive.
+logged as-is by default -- that's the content a reviewer actually needs to
+see to tell a real attack from a false positive.
+
+That default is a real trade-off, not a free lunch: an attack phrase can
+still co-occur with real user content in the same message (a prompt
+containing both a genuine question and an injection attempt), and a
+deployment handling classified/regulated input may not be able to accept
+*any* raw request content landing in a log at all, even a log this
+narrowly scoped. Setting `OPENBOUNCER_LOG_PROMPT_CONTENT=false` (default:
+enabled, matching every existing "log the content" behavior in this
+module) makes `record_event()` replace `snippet` with a bracketed
+category placeholder for *every* event, prompt-injection included --
+category/pattern_name/action/via/model/key_id/request_id are all
+classification metadata, never content, so investigation still works, just
+without ever writing the matched text itself to disk.
 """
 
 import json
@@ -57,6 +70,17 @@ MAX_ENTRIES_ENV_VAR = "OPENBOUNCER_GUARDRAIL_EVENTS_MAX_ENTRIES"
 # long matched span (e.g. a huge base64 blob), not a privacy measure (see
 # the module docstring for the actual privacy mechanism).
 _MAX_SNIPPET_LENGTH = 300
+
+# See the module docstring's second paragraph. Enabled (log content) by
+# default -- flipping it is an opt-in, deployment-level privacy posture,
+# same "existing behavior is the default" discipline as every other env
+# var in this codebase.
+LOG_PROMPT_CONTENT_ENV_VAR = "OPENBOUNCER_LOG_PROMPT_CONTENT"
+
+
+def _log_prompt_content() -> bool:
+    raw = os.environ.get(LOG_PROMPT_CONTENT_ENV_VAR)
+    return raw is None or raw.strip().lower() not in ("false", "0", "no")
 
 
 def _max_entries() -> int:
@@ -112,7 +136,15 @@ def record_event(
     """Appends one entry. Plain synchronous file append with no `await` in
     between construction and the write -- same "safe without an explicit
     lock" reasoning as app.core.audit.record_entry (nothing else can
-    interleave mid-call within a single asyncio event loop)."""
+    interleave mid-call within a single asyncio event loop).
+
+    Snippet redaction is enforced here, centrally, rather than left to each
+    caller in app/api/routes/chat.py to remember -- this is the one place
+    every event passes through regardless of which guardrail produced it,
+    so it's the one place a zero-retention policy can't be accidentally
+    bypassed by a new call site forgetting to check it.
+    """
+    effective_snippet = snippet if _log_prompt_content() else f"[{category}]"
     event = GuardrailEvent(
         id=uuid.uuid4().hex,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -124,7 +156,7 @@ def record_event(
         pattern_name=pattern_name,
         action=action,
         via=via,
-        snippet=snippet[:_MAX_SNIPPET_LENGTH],
+        snippet=effective_snippet[:_MAX_SNIPPET_LENGTH],
     )
     path = _events_path()
     path.parent.mkdir(parents=True, exist_ok=True)

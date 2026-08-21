@@ -8,6 +8,7 @@ from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
 from app.auth.keys import KeyStore, get_key_store, hash_api_key
 from app.auth.rate_limiter import SupportsRateLimiting, get_rate_limiter
 from app.core.errors import OpenAIError
+from app.core.registry import ModelEntry
 from app.core.request_context import get_request_id
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ class AuthContext:
     # in app.auth.keys for why this is nullable rather than defaulting to
     # an empty (deny-everything) list.
     allowed_guardrails_configs: list[str] | None = None
+    # None means no sovereignty constraint -- see
+    # APIKeyRecord.required_sovereignty.
+    required_sovereignty: dict[str, str] | None = None
     # Already the *effective* set (APIKeyRecord.effective_admin_scopes()) --
     # every scope if is_admin, else exactly the key's own admin_scopes. See
     # require_scope() below, which is the only thing that reads this.
@@ -121,6 +125,9 @@ async def require_api_key(
             if record.allowed_guardrails_configs is not None
             else None
         ),
+        required_sovereignty=(
+            dict(record.required_sovereignty) if record.required_sovereignty is not None else None
+        ),
         admin_scopes=record.effective_admin_scopes(),
     )
 
@@ -213,4 +220,41 @@ def ensure_guardrails_config_allowed(auth: AuthContext, config_id: str) -> None:
             error_type="permission_error",
             param="guardrails.config_id",
             code="guardrails_config_not_allowed",
+        )
+
+
+def ensure_sovereignty_allowed(auth: AuthContext, entry: ModelEntry) -> None:
+    """Rejects a model whose ModelEntry.sovereignty tags don't satisfy
+    every tag=value pair the key's required_sovereignty declares. A model
+    with no sovereignty tags declared at all (entry.sovereignty is None)
+    fails any key with a non-None required_sovereignty -- silence isn't
+    treated as an implicit match, the same "absent = safe default" logic
+    used elsewhere just points the other way here: a policy decision this
+    consequential shouldn't default to "allowed" just because an operator
+    forgot to tag a model.
+    """
+    if auth.required_sovereignty is None:
+        return
+
+    declared = entry.sovereignty or {}
+    unmet = {
+        tag: required_value
+        for tag, required_value in auth.required_sovereignty.items()
+        if declared.get(tag) != required_value
+    }
+    if unmet:
+        logger.warning(
+            "Forbidden model (sovereignty): key_id=%s model=%s unmet=%s [request_id=%s]",
+            auth.key_id,
+            entry.id,
+            unmet,
+            get_request_id(),
+        )
+        raise OpenAIError(
+            f"Model `{entry.id}` does not meet this API key's required sovereignty "
+            f"constraints: {unmet}.",
+            status_code=403,
+            error_type="permission_error",
+            param="model",
+            code="sovereignty_violation",
         )

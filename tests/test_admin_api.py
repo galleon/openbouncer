@@ -417,6 +417,28 @@ class TestCreateKey:
         assert body["token_budget_monthly"] == 2_000_000
 
     @pytest.mark.asyncio
+    async def test_defaults_to_no_sovereignty_constraint(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={"id": "new-key", "allowed_models": ["local/gemma4-nvfp4"]},
+        )
+        assert response.status_code == 201
+        assert response.json()["key"]["required_sovereignty"] is None
+
+    @pytest.mark.asyncio
+    async def test_required_sovereignty_round_trips(self, admin_client, scratch_keys_file):
+        response = await admin_client.post(
+            "/api/admin/keys",
+            json={
+                "id": "sovereign-key",
+                "allowed_models": ["local/gemma4-nvfp4"],
+                "required_sovereignty": {"data_residency": "EU"},
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["key"]["required_sovereignty"] == {"data_residency": "EU"}
+
+    @pytest.mark.asyncio
     async def test_zero_token_budget_rejected(self, admin_client, scratch_keys_file):
         response = await admin_client.post(
             "/api/admin/keys",
@@ -502,6 +524,27 @@ class TestUpdateKey:
         )
         assert response.status_code == 200
         assert response.json()["token_budget_daily"] == 50_000
+
+    @pytest.mark.asyncio
+    async def test_sets_required_sovereignty(self, admin_client, scratch_keys_file):
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key",
+            json={"required_sovereignty": {"data_residency": "EU"}},
+        )
+        assert response.status_code == 200
+        assert response.json()["required_sovereignty"] == {"data_residency": "EU"}
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_clears_required_sovereignty(self, admin_client, scratch_keys_file):
+        await admin_client.patch(
+            "/api/admin/keys/scratch-key",
+            json={"required_sovereignty": {"data_residency": "EU"}},
+        )
+        response = await admin_client.patch(
+            "/api/admin/keys/scratch-key", json={"required_sovereignty": None}
+        )
+        assert response.status_code == 200
+        assert response.json()["required_sovereignty"] is None
 
     @pytest.mark.asyncio
     async def test_grant_admin_is_live_without_restart(self, admin_client, scratch_keys_file):

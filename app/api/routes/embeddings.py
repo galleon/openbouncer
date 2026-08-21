@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from app.auth.budget import SupportsBudgetTracking, get_budget_tracker
-from app.auth.dependency import AuthContext, ensure_model_allowed, require_api_key
+from app.auth.dependency import AuthContext, ensure_model_allowed, ensure_sovereignty_allowed, require_api_key
 from app.auth.usage import SupportsUsageTracking, get_usage_tracker
 from app.core.errors import OpenAIError
 from app.core.registry import ModelRegistry, get_model_registry, resolve_api_key
@@ -47,6 +47,7 @@ async def create_embeddings(
             param="model",
             code="model_does_not_support_embeddings",
         )
+    ensure_sovereignty_allowed(auth, entry)
 
     api_key = resolve_api_key(entry)
     limiter = registry.get_concurrency_limiter(request.model)

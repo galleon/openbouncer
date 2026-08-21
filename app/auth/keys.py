@@ -85,6 +85,14 @@ class APIKeyRecord(BaseModel):
     # app.auth.usage.UsageTracker.
     token_budget_daily: int | None = Field(default=None, gt=0)
     token_budget_monthly: int | None = Field(default=None, gt=0)
+    # None (the default) means no sovereignty constraint -- same "opt-in
+    # cap" posture as allowed_guardrails_configs/token_budget_*. A non-None
+    # dict is a set of required tag=value pairs a requested model's own
+    # ModelEntry.sovereignty must satisfy exactly (see
+    # app.auth.dependency.ensure_sovereignty_allowed) -- e.g.
+    # {"data_residency": "EU"} rejects any model not tagged that way,
+    # including one with no sovereignty tags declared at all.
+    required_sovereignty: dict[str, str] | None = None
     # Fine-grained admin capabilities for a key that isn't a full
     # `is_admin: true` super-admin -- see ALL_ADMIN_SCOPES. Ignored (every
     # scope is implied) when is_admin is true; only matters for a

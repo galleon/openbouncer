@@ -40,6 +40,19 @@ class ModelEntry(BaseModel):
     api_key_env: str
     capabilities: list[Capability] = Field(min_length=1)
     concurrency_limit: int = Field(gt=0)
+    # Free-form provenance/hosting tags an operator defines for their own
+    # compliance framework -- e.g. {"data_residency": "EU", "hosting":
+    # "on-prem", "legal_jurisdiction": "FR"}. Deliberately untyped rather
+    # than a fixed set of named fields: "data residency" (where data is
+    # physically stored) and "data sovereignty" (who has legal control
+    # over it) are distinct legal concepts, and different operators'
+    # compliance frameworks disagree on the right taxonomy -- this
+    # codebase has no authority to encode one as "correct", so it just
+    # carries whatever tags an operator assigns and checks for exact
+    # matches (see app.auth.dependency.ensure_sovereignty_allowed). None
+    # (the default) means no tags are declared, which fails any key that
+    # requires one.
+    sovereignty: dict[str, str] | None = None
 
 
 class ModelRegistryConfig(BaseModel):

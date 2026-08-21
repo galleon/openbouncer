@@ -7,6 +7,7 @@ from app.auth.dependency import (
     AuthContext,
     ensure_guardrails_config_allowed,
     ensure_model_allowed,
+    ensure_sovereignty_allowed,
     require_api_key,
     require_scope,
 )
@@ -14,6 +15,7 @@ from app.auth.budget import BudgetTracker
 from app.auth.keys import ALL_ADMIN_SCOPES, APIKeyRecord, parse_key_store
 from app.auth.rate_limiter import RateLimiter
 from app.core.errors import OpenAIError
+from app.core.registry import ModelEntry
 
 RAW_KEY = "sk-unit-test-0123456789"
 KEY_HASH = hashlib.sha256(RAW_KEY.encode()).hexdigest()
@@ -307,3 +309,62 @@ class TestEnsureGuardrailsConfigAllowed:
         auth = AuthContext(key_id="k", allowed_models=[], allowed_guardrails_configs=None)
         ensure_guardrails_config_allowed(auth, "self_check_input")
         ensure_guardrails_config_allowed(auth, "anything-at-all")
+
+
+def _model_entry(**overrides) -> ModelEntry:
+    fields = dict(
+        id="local/gemma4-nvfp4",
+        upstream_model="nvidia/Gemma-4-26B-A4B-NVFP4",
+        base_url="http://vllm-gemma4:8000/v1",
+        api_key_env="UPSTREAM_VLLM_API_KEY",
+        capabilities=["chat"],
+        concurrency_limit=4,
+    )
+    fields.update(overrides)
+    return ModelEntry(**fields)
+
+
+class TestEnsureSovereigntyAllowed:
+    def test_no_constraint_is_unrestricted(self):
+        # The default -- no key had this restriction before the field
+        # existed, so it must stay a no-op unless a key explicitly sets it.
+        auth = AuthContext(key_id="k", allowed_models=[], required_sovereignty=None)
+        ensure_sovereignty_allowed(auth, _model_entry(sovereignty=None))
+        ensure_sovereignty_allowed(auth, _model_entry(sovereignty={"data_residency": "US"}))
+
+    def test_matching_tag_passes_silently(self):
+        auth = AuthContext(key_id="k", allowed_models=[], required_sovereignty={"data_residency": "EU"})
+        ensure_sovereignty_allowed(auth, _model_entry(sovereignty={"data_residency": "EU", "hosting": "on-prem"}))
+
+    def test_mismatched_tag_rejected(self):
+        auth = AuthContext(key_id="k", allowed_models=[], required_sovereignty={"data_residency": "EU"})
+        with pytest.raises(OpenAIError) as exc_info:
+            ensure_sovereignty_allowed(auth, _model_entry(sovereignty={"data_residency": "US"}))
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error_type == "permission_error"
+        assert exc_info.value.code == "sovereignty_violation"
+        assert exc_info.value.param == "model"
+
+    def test_model_with_no_tags_declared_fails_a_constrained_key(self):
+        # Absence isn't an implicit match -- see ensure_sovereignty_allowed's
+        # docstring.
+        auth = AuthContext(key_id="k", allowed_models=[], required_sovereignty={"data_residency": "EU"})
+        with pytest.raises(OpenAIError) as exc_info:
+            ensure_sovereignty_allowed(auth, _model_entry(sovereignty=None))
+        assert exc_info.value.code == "sovereignty_violation"
+
+    def test_all_required_tags_must_match(self):
+        auth = AuthContext(
+            key_id="k",
+            allowed_models=[],
+            required_sovereignty={"data_residency": "EU", "hosting": "on-prem"},
+        )
+        # Only one of the two required tags matches.
+        with pytest.raises(OpenAIError):
+            ensure_sovereignty_allowed(auth, _model_entry(sovereignty={"data_residency": "EU", "hosting": "cloud"}))
+
+    def test_extra_tags_on_the_model_do_not_matter(self):
+        auth = AuthContext(key_id="k", allowed_models=[], required_sovereignty={"data_residency": "EU"})
+        ensure_sovereignty_allowed(
+            auth, _model_entry(sovereignty={"data_residency": "EU", "legal_jurisdiction": "FR", "license": "apache-2.0"})
+        )

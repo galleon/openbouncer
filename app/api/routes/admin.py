@@ -110,6 +110,9 @@ def _to_admin_key_item(record) -> AdminKeyItem:
         requests_per_minute=record.requests_per_minute,
         token_budget_daily=record.token_budget_daily,
         token_budget_monthly=record.token_budget_monthly,
+        required_sovereignty=(
+            dict(record.required_sovereignty) if record.required_sovereignty is not None else None
+        ),
     )
 
 
@@ -175,6 +178,7 @@ async def create_key_endpoint(
         allowed_guardrails_configs=body.allowed_guardrails_configs,
         token_budget_daily=body.token_budget_daily,
         token_budget_monthly=body.token_budget_monthly,
+        required_sovereignty=body.required_sovereignty,
     )
 
     try:

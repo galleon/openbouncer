@@ -4,6 +4,11 @@
 
 An OpenAI-compatible LLM gateway with pluggable guardrails.
 
+See [SOVEREIGN.md](SOVEREIGN.md) for the project's positioning: a small,
+fully-inspectable policy layer for self-hosted LLMs, with zero-network
+guardrails and sovereignty-tagged model routing as the two properties
+that differentiate it from other self-hostable gateways.
+
 ## Quick start
 
 ```bash
@@ -155,10 +160,44 @@ keys:
     requests_per_minute: 60              # optional, defaults to 60
     token_budget_daily: 500000           # optional, defaults to unlimited -- see Token budgets below
     token_budget_monthly: 10000000       # optional, defaults to unlimited -- see Token budgets below
+    required_sovereignty: {data_residency: EU}  # optional, defaults to unrestricted -- see Sovereignty routing below
     is_admin: false                      # optional, defaults to false -- see Admin API below
     admin_scopes: [metrics:read]         # optional, defaults to [] -- see Scoped admin access below
     allowed_guardrails_configs: [content_safety]  # optional, defaults to unrestricted -- see Admin API below
 ```
+
+### Sovereignty routing
+
+`allowed_models` says *which* models a key may request; `required_sovereignty`
+says *what those models must be* -- a key/tenant that declares e.g.
+`required_sovereignty: {data_residency: EU}` gets a real `403`
+(`error.code: sovereignty_violation`) for any allowed model that doesn't
+carry a matching `data_residency: EU` tag, checked in
+`app.auth.dependency.ensure_sovereignty_allowed` right alongside
+`ensure_model_allowed`, before any upstream call (including for streaming
+requests, same as the prompt-injection pre-filter).
+
+Model entries in `config/models.yaml` carry the other half via an optional
+`sovereignty:` map:
+
+```yaml
+- id: local/gemma4-nvfp4
+  # ...
+  sovereignty:
+    hosting: on-prem
+    data_residency: EU
+```
+
+**Deliberately untyped** -- not a fixed `data_residency`/`hosting`/
+`provider_country` schema. "Data residency" (where data is physically
+stored) and "data sovereignty" (who has legal control over it) are
+distinct legal concepts, and different compliance frameworks disagree on
+the right taxonomy; this codebase has no authority to encode one as
+correct; it just checks whatever tags an operator assigns for an exact
+match. A model with no `sovereignty:` tags declared at all fails any key
+with a `required_sovereignty` constraint -- absence is never treated as an
+implicit match, and every one of a key's required tags must match, not
+just some.
 
 ### Rate limiting
 
@@ -269,6 +308,7 @@ limiting, and usage accounting.
 | Over `requests_per_minute` | 429 | `rate_limit_error` | `rate_limit_exceeded` |
 | Over `token_budget_daily`/`token_budget_monthly` (see [Token budgets](#token-budgets)) | 429 | `rate_limit_error` | `token_budget_exceeded` |
 | Model not in the key's `allowed_models` | 403 | `permission_error` | `model_not_allowed` |
+| Model doesn't meet the key's `required_sovereignty` (see [Sovereignty routing](#sovereignty-routing)) | 403 | `permission_error` | `sovereignty_violation` |
 | `guardrails.config_id` not in the key's `allowed_guardrails_configs` | 403 | `permission_error` | `guardrails_config_not_allowed` |
 | Blocked by the [prompt injection detection](#prompt-injection-detection) guardrail | 403 | `permission_error` | `prompt_injection_detected` |
 | Blocked by the [output-leak guardrail](#output-leak-guardrail) (non-streaming only -- see that section for streaming) | 403 | `permission_error` | `output_leak_detected` |
@@ -581,7 +621,20 @@ copy of the very data the output-leak guardrail exists to keep from
 leaking further. Prompt-injection snippets are the adversarial *input*
 phrase itself (e.g. "ignore all previous instructions") -- not PII, and
 exactly what a reviewer needs to tell a real attack from a false
-positive, so those are logged as-is.
+positive, so those are logged as-is *by default*.
+
+That default doesn't hold for every deployment: an attack phrase can
+co-occur with real user content in the same message, and some deployments
+(classified/regulated input) may not be able to accept *any* raw request
+content in a log at all. Setting `OPENBOUNCER_LOG_PROMPT_CONTENT=false`
+(default: enabled) makes `record_event()` replace every event's `snippet`
+-- prompt-injection included -- with a bracketed category placeholder
+(e.g. `[instruction_override]`) instead of the matched text. Enforced
+centrally in `app/core/guardrail_events.py`, not per call site, so a new
+guardrail added later can't accidentally bypass it. Every other field
+(`category`/`pattern_name`/`action`/`via`/`model`/`key_id`/`request_id`)
+is classification metadata, not content, and is unaffected -- investigation
+still works, it just never has the matched text to show.
 
 The Activity dashboard's "Guardrail events" table (`/ui/activity.html`)
 renders this endpoint with the same three filters, and -- unlike the rest
@@ -846,10 +899,12 @@ how output rails affect streaming latency.
 ## Model registry
 
 The models the gateway exposes and how to reach their upstream (upstream
-model id, base URL, API key env var, capabilities, concurrency limit) are
-loaded from `config/models.yaml`, overridable via `OPENBOUNCER_MODELS_CONFIG`
-/ `MODEL_CONFIG_PATH` (path to an alternate YAML file, either name works) or
-`OPENBOUNCER_MODELS_YAML` (inline YAML content).
+model id, base URL, API key env var, capabilities, concurrency limit, and
+an optional `sovereignty:` tag map -- see [Sovereignty
+routing](#sovereignty-routing)) are loaded from `config/models.yaml`,
+overridable via `OPENBOUNCER_MODELS_CONFIG` / `MODEL_CONFIG_PATH` (path to
+an alternate YAML file, either name works) or `OPENBOUNCER_MODELS_YAML`
+(inline YAML content).
 
 There's no fixed allowlist of ids -- the registry is entirely
 operator-defined. `base_url` can point at any OpenAI-compatible endpoint, not

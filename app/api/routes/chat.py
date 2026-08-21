@@ -16,6 +16,7 @@ from app.auth.dependency import (
     AuthContext,
     ensure_guardrails_config_allowed,
     ensure_model_allowed,
+    ensure_sovereignty_allowed,
     require_api_key,
 )
 from app.auth.usage import SupportsUsageTracking, get_usage_tracker
@@ -367,13 +368,15 @@ async def create_chat_completion(
 
     try:
         ensure_model_allowed(auth, request.model)
-        if "chat" not in registry.get(request.model).capabilities:
+        entry = registry.get(request.model)
+        if "chat" not in entry.capabilities:
             raise OpenAIError(
                 f"Model `{request.model}` does not support chat completions.",
                 status_code=400,
                 param="model",
                 code="model_does_not_support_chat",
             )
+        ensure_sovereignty_allowed(auth, entry)
         if pi_config.enabled:
             PROMPT_INJECTION_SCANNED_TOTAL.inc()
             pi_results = scan_request(request, pi_config)

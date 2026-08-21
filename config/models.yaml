@@ -23,3 +23,10 @@ models:
     capabilities:
       - chat
     concurrency_limit: 4
+    # Optional, free-form -- see ModelEntry.sovereignty and
+    # ensure_sovereignty_allowed() for how a key's required_sovereignty is
+    # checked against these. Tags are whatever an operator's own compliance
+    # framework calls them; this example just shows the shape.
+    sovereignty:
+      hosting: on-prem
+      data_residency: EU
