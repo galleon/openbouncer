@@ -1,5 +1,15 @@
 FROM python:3.12-slim
 
+# Set to "true" to include the optional `nemoguardrails` dependency
+# (GUARDRAILS_MODE=nemo_library only -- everything else, including the
+# default `disabled` mode, nemo_microservice, and the local regex-based
+# prompt-injection/output-leak guardrails, works without it). Opt in via
+# `docker compose -f docker-compose.yml -f docker-compose.nemo.yml up
+# --build`, or `--build-arg INSTALL_NEMO=true` directly -- left "false" by
+# default so the image stays free of NeMo's NVIDIA/transformer stack unless
+# a deployment actually needs it. See the README's Guardrails section.
+ARG INSTALL_NEMO=false
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -14,11 +24,19 @@ WORKDIR /app
 # Install dependencies first (separate layer from app code) so code-only
 # changes don't invalidate the dependency-install cache.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN if [ "$INSTALL_NEMO" = "true" ]; then \
+        uv sync --frozen --no-install-project --no-dev --extra nemo; \
+    else \
+        uv sync --frozen --no-install-project --no-dev; \
+    fi
 
 COPY app ./app
 COPY config ./config
-RUN uv sync --frozen --no-dev
+RUN if [ "$INSTALL_NEMO" = "true" ]; then \
+        uv sync --frozen --no-dev --extra nemo; \
+    else \
+        uv sync --frozen --no-dev; \
+    fi
 
 EXPOSE 8000
 

@@ -1028,11 +1028,29 @@ instead of it.
 Guardrails are configured via `app.guardrails.service.GuardrailsService` and
 selected with the `GUARDRAILS_MODE` environment variable:
 
-| Mode | `GUARDRAILS_MODE` value | What it does |
-| --- | --- | --- |
-| Disabled | `disabled` (default) | No-op; requests pass straight through to the upstream LLM. |
-| NeMo Guardrails Microservice | `nemo_microservice` | Calls a separately-running [NeMo Guardrails Microservice](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo-microservices/containers/guardrails) container's OpenAI-compatible `/v1/chat/completions` endpoint. |
-| NeMo Guardrails library | `nemo_library` | Runs [nemoguardrails](https://github.com/NVIDIA-NeMo/Guardrails) in-process against locally-loaded configs. |
+| Mode | `GUARDRAILS_MODE` value | What it does | Needs the `nemo` extra? |
+| --- | --- | --- | --- |
+| Disabled | `disabled` (default) | No-op; requests pass straight through to the upstream LLM. | No |
+| NeMo Guardrails Microservice | `nemo_microservice` | Calls a separately-running [NeMo Guardrails Microservice](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo-microservices/containers/guardrails) container's OpenAI-compatible `/v1/chat/completions` endpoint -- a plain `httpx` call, no library needed on this side. | No |
+| NeMo Guardrails library | `nemo_library` | Runs [nemoguardrails](https://github.com/NVIDIA-NeMo/Guardrails) in-process against locally-loaded configs. | **Yes** |
+
+**`nemoguardrails` is an optional dependency** (`pyproject.toml`'s `nemo`
+extra), not installed by default -- it pulls a large NVIDIA/transformer
+stack that a minimal or air-gapped deployment shouldn't have to carry just
+to run the default guardrails (the always-available [prompt injection
+detection](#prompt-injection-detection) and [output-leak
+guardrail](#output-leak-guardrail) below need no LLM call and no extra
+package at all). Only `nemo_library` mode needs it:
+
+- **Local dev**: `uv sync --extra dev --extra nemo`.
+- **Docker**: `docker compose -f docker-compose.yml -f docker-compose.nemo.yml up --build` (see that file's comments). The published `ghcr.io/galleon/openbouncer` image (see [Supply chain](#supply-chain)) does **not** include it.
+- Selecting `nemo_library` without the package installed fails clearly at
+  first use (`error.code: nemo_library_not_installed`), not with a raw
+  import traceback or a startup crash -- `disabled` and `nemo_microservice`
+  are entirely unaffected either way, and the admin API's guardrails-config
+  editor still works read-only (listing/viewing presets) without it; only
+  *saving* an edit to a `nemo_library` preset needs it, since that's what
+  validates the edit didn't break the config.
 
 ### `nemo_microservice` mode
 

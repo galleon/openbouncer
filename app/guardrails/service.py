@@ -11,9 +11,24 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import httpx
-from nemoguardrails import LLMRails, RailsConfig
 
 from app.core.errors import OpenAIError, format_sse_error, normalize_upstream_error
+
+# Optional dependency (see pyproject.toml's "nemo" extra) -- only needed for
+# GUARDRAILS_MODE=nemo_library (NemoLibraryGuardrailsService below).
+# DisabledGuardrailsService and NemoMicroserviceGuardrailsService (a plain
+# httpx client against a separate container) work fine without it, so the
+# whole module -- and everything that imports it, including app.main at
+# startup -- must not fail to import just because this package isn't
+# installed. create_guardrails_service() raises a clear, actionable error
+# only if nemo_library mode is actually selected and this import failed.
+try:
+    from nemoguardrails import LLMRails, RailsConfig
+
+    _NEMOGUARDRAILS_IMPORT_ERROR: Exception | None = None
+except ImportError as exc:
+    LLMRails = RailsConfig = None  # type: ignore[assignment,misc]
+    _NEMOGUARDRAILS_IMPORT_ERROR = exc
 from app.schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -615,6 +630,20 @@ def create_guardrails_service(config: GuardrailsConfig | None = None) -> Guardra
             timeout=config.timeout_seconds,
         )
     if config.mode is GuardrailsMode.NEMO_LIBRARY:
+        if RailsConfig is None:
+            raise OpenAIError(
+                "GUARDRAILS_MODE=nemo_library requires the optional 'nemoguardrails' "
+                "package, which isn't installed in this deployment "
+                f"({_NEMOGUARDRAILS_IMPORT_ERROR}). Install it with `uv sync --extra "
+                "nemo`, or build/run the Docker image with the nemo extra enabled "
+                "(see the README's Guardrails section) -- or switch GUARDRAILS_MODE "
+                "to `disabled` or `nemo_microservice`, neither of which need this "
+                "package (nemo_microservice only calls a separate microservice over "
+                "HTTP).",
+                status_code=500,
+                error_type="api_error",
+                code="nemo_library_not_installed",
+            )
         return NemoLibraryGuardrailsService(
             config_store_path=config.nemo_library_config_path,
             default_config_id=config.nemo_default_config_id,

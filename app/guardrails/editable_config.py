@@ -18,11 +18,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from nemoguardrails import RailsConfig
 
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
 from app.guardrails.service import GuardrailsService
+
+# Optional dependency (see pyproject.toml's "nemo" extra) -- only needed for
+# the post-write validation step below (RailsConfig.from_path), which
+# confirms an edited preset still loads before it's ever persisted for
+# real. See app.guardrails.service's identical import-guard comment for why
+# this can't be a hard top-level dependency.
+try:
+    from nemoguardrails import RailsConfig
+
+    _NEMOGUARDRAILS_IMPORT_ERROR: Exception | None = None
+except ImportError as exc:
+    RailsConfig = None  # type: ignore[assignment,misc]
+    _NEMOGUARDRAILS_IMPORT_ERROR = exc
 
 _MAX_ITEMS = 100
 _MAX_ITEM_LENGTH = 500
@@ -288,6 +300,16 @@ def write_editable_sections(
     if reread != validated:
         raise GuardrailsConfigParseError(
             "Internal error: splice round-trip mismatch, aborting write."
+        )
+
+    if RailsConfig is None:
+        # Known upfront, before anything is written -- no partial/unvalidated
+        # write to roll back, unlike the reload failure below.
+        raise GuardrailsConfigParseError(
+            "Cannot validate this edit: the optional 'nemoguardrails' package "
+            f"isn't installed in this deployment ({_NEMOGUARDRAILS_IMPORT_ERROR}). "
+            "Install it with `uv sync --extra nemo` to enable editing nemo_library "
+            "guardrails configs."
         )
 
     atomic_write_text(config_path, text)

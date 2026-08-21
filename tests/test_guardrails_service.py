@@ -148,6 +148,43 @@ class TestGuardrailsServiceFactory:
         assert service._default_config_id == "no_rails"
 
 
+class TestNemoLibraryModeWithoutTheOptionalPackage:
+    """Simulates `nemoguardrails` not being installed (the `nemo` extra
+    omitted, see pyproject.toml) by patching the module's own RailsConfig
+    binding to None -- the same state app.guardrails.service ends up in
+    when the real `import nemoguardrails` fails, without needing to
+    actually uninstall the package for this test."""
+
+    def test_nemo_library_mode_raises_a_clear_actionable_error(self, monkeypatch):
+        import app.guardrails.service as service_module
+
+        monkeypatch.setattr(service_module, "RailsConfig", None)
+        config = GuardrailsConfig(mode=GuardrailsMode.NEMO_LIBRARY)
+
+        with pytest.raises(OpenAIError) as exc_info:
+            create_guardrails_service(config)
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.error_type == "api_error"
+        assert exc_info.value.code == "nemo_library_not_installed"
+        assert "uv sync --extra nemo" in exc_info.value.message
+
+    def test_disabled_and_nemo_microservice_modes_are_unaffected(self, monkeypatch):
+        import app.guardrails.service as service_module
+
+        monkeypatch.setattr(service_module, "RailsConfig", None)
+        monkeypatch.setattr(service_module, "LLMRails", None)
+
+        assert isinstance(
+            create_guardrails_service(GuardrailsConfig(mode=GuardrailsMode.DISABLED)),
+            DisabledGuardrailsService,
+        )
+        assert isinstance(
+            create_guardrails_service(GuardrailsConfig(mode=GuardrailsMode.NEMO_MICROSERVICE)),
+            NemoMicroserviceGuardrailsService,
+        )
+
+
 class TestNemoMicroserviceGuardrailsService:
     @pytest.mark.asyncio
     @respx.mock

@@ -21,7 +21,10 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        # --extra nemo: the suite exercises GUARDRAILS_MODE=nemo_library
+        # (tests/test_nemo_library_guardrails.py and friends), which needs
+        # the optional nemoguardrails package -- see pyproject.toml.
+        run: uv sync --extra dev --extra nemo --frozen
 
       - name: Run tests
         run: uv run pytest

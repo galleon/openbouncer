@@ -1,0 +1,17 @@
+# Opt-in override that builds the image with the optional `nemoguardrails`
+# package included (see the Dockerfile's INSTALL_NEMO build arg), needed
+# for GUARDRAILS_MODE=nemo_library. Layer it on top of the base file
+# explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nemo.yml up --build
+#
+# Left out of docker-compose.yml itself so `docker compose up` stays the
+# minimal-footprint default -- no NVIDIA/transformer stack in the image --
+# unless you deliberately opt into this file. GUARDRAILS_MODE=disabled
+# (the default) and nemo_microservice both work without this override;
+# only nemo_library needs it.
+services:
+  gateway:
+    build:
+      args:
+        INSTALL_NEMO: "true"
