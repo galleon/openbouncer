@@ -146,23 +146,31 @@ repo's `Dockerfile` and publishes `ghcr.io/galleon/openbouncer` with:
   `attest-build-provenance`) -- what workflow, what commit, what inputs
   produced this exact image.
 
-Verify an image without trusting anything but Sigstore's public transparency log:
+Verify the image signature without trusting anything but Sigstore's public
+transparency log:
 
 ```bash
 cosign verify \
   --certificate-identity "https://github.com/galleon/openbouncer/.github/workflows/docker-publish.yml@refs/heads/main" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   ghcr.io/galleon/openbouncer:latest
-
-# The SBOM attestation itself:
-cosign verify-attestation --type cyclonedx \
-  --certificate-identity "https://github.com/galleon/openbouncer/.github/workflows/docker-publish.yml@refs/heads/main" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/galleon/openbouncer:latest
 ```
 
-Or, using the `gh` CLI's native attestation support (checks the SLSA
-provenance specifically):
+Fetch the signed SBOM itself and inspect it (`cosign verify-attestation
+--type cyclonedx` is the "should work" command here, but as of cosign
+v3.1, its predicate-type matching only looks at the same OCI-referrers
+store `attest-build-provenance` writes the SLSA predicate to, not the
+tag-based store `cosign attest` uses for the SBOM -- this pulls the raw
+signed attestation and extracts the predicate directly instead of relying
+on that lookup):
+
+```bash
+cosign download attestation ghcr.io/galleon/openbouncer:latest \
+  | jq -r 'select(.payload) | .payload | @base64d | fromjson |
+      select(.predicateType == "https://cyclonedx.org/bom") | .predicate'
+```
+
+And GitHub's native attestation verification (checks the SLSA provenance specifically):
 
 ```bash
 gh attestation verify oci://ghcr.io/galleon/openbouncer:latest --owner galleon
