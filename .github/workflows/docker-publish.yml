@@ -1,0 +1,92 @@
+name: Build, Sign & Publish
+
+# Triggered by the Tests workflow completing on main, not push/pull_request
+# directly -- gates publishing on the test suite actually having passed for
+# this exact commit, without duplicating tests.yml's job definitions here
+# (workflow_run avoids that duplication; a `needs:` job in this same file
+# would mean re-defining the whole test job and keeping two copies in
+# sync). Never runs for pull_request events: there's nothing meaningful to
+# publish/sign for an unmerged PR, and a fork PR wouldn't have package-write
+# credentials anyway.
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    branches: [main]
+    types: [completed]
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # required for cosign's keyless (Sigstore/Fulcio) signing and for attest-build-provenance
+  attestations: write
+
+jobs:
+  build-sign-attest:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The exact commit Tests just verified, not just "main" (which
+          # may have moved on by the time this job starts) -- what gets
+          # signed/attested must be what was actually tested.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+
+      - name: Upload SBOM as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.event.workflow_run.head_sha }}
+          path: sbom.cyclonedx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image (keyless -- no stored private key, no secret to manage)
+        run: cosign sign --yes "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attach the SBOM as a signed attestation on the image
+        run: |
+          cosign attest --yes \
+            --predicate sbom.cyclonedx.json \
+            --type cyclonedx \
+            "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

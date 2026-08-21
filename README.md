@@ -126,6 +126,52 @@ built-in in-memory limiter and tracker -- no code or config changes needed
 either way (both `app/auth/rate_limiter.py` and `app/auth/usage.py` switch
 on the same `REDIS_URL`).
 
+### Supply chain
+
+Every push to `main` that passes the [test suite](#quick-start) triggers
+`.github/workflows/docker-publish.yml`, which builds the image in this
+repo's `Dockerfile` and publishes `ghcr.io/galleon/openbouncer` with:
+
+- **A [CycloneDX](https://cyclonedx.org/) SBOM** (via
+  [`anchore/sbom-action`](https://github.com/anchore/sbom-action)) --
+  every OS package (from the `python:3.12-slim` base) and every Python
+  dependency actually shipped in the image, not just what's declared in
+  `pyproject.toml`. Downloadable from the workflow run's artifacts, and
+  attached to the image itself as a signed attestation.
+- **A keyless [cosign](https://docs.sigstore.dev/cosign/overview/)
+  signature** -- tied to this repo's GitHub Actions OIDC identity via
+  Sigstore (Fulcio/Rekor), not a stored private key, so there's no signing
+  secret to leak or rotate.
+- **[SLSA build provenance](https://slsa.dev/)** (via GitHub's native
+  `attest-build-provenance`) -- what workflow, what commit, what inputs
+  produced this exact image.
+
+Verify an image without trusting anything but Sigstore's public transparency log:
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/galleon/openbouncer/.github/workflows/docker-publish.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/galleon/openbouncer:latest
+
+# The SBOM attestation itself:
+cosign verify-attestation --type cyclonedx \
+  --certificate-identity "https://github.com/galleon/openbouncer/.github/workflows/docker-publish.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/galleon/openbouncer:latest
+```
+
+Or, using the `gh` CLI's native attestation support (checks the SLSA
+provenance specifically):
+
+```bash
+gh attestation verify oci://ghcr.io/galleon/openbouncer:latest --owner galleon
+```
+
+This is the same "don't just claim it, make it checkable" posture as
+[sovereignty routing](#sovereignty-routing) and [zero-retention
+logging](#guardrail-decision-log) -- see [SOVEREIGN.md](SOVEREIGN.md).
+
 ## Authentication
 
 Every `/v1/*` endpoint requires an API key via `Authorization: Bearer <key>`
