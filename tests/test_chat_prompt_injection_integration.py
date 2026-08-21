@@ -5,6 +5,8 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+
+pytest.importorskip("nemoguardrails")
 from nemoguardrails.testing import FakeLLMModel
 
 from app.guardrails.prompt_injection import InjectionAction, PromptInjectionConfig, get_prompt_injection_config

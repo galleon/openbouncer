@@ -4,6 +4,8 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+
+pytest.importorskip("nemoguardrails")
 from nemoguardrails.testing import FakeLLMModel
 
 from app.guardrails.service import GuardrailsService, NemoLibraryGuardrailsService, get_guardrails_service

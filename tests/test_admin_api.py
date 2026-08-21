@@ -3,6 +3,8 @@ import shutil
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("nemoguardrails")
 from nemoguardrails import RailsConfig
 from nemoguardrails.testing import FakeLLMModel
 
