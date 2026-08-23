@@ -99,7 +99,14 @@ def load_guardrails_config() -> GuardrailsConfig:
     )
 
 
-def _extract_text(content: str | list) -> str:
+def _extract_text(content: str | list | None) -> str:
+    # None for a tool-calling assistant turn (content=None, tool_calls set)
+    # replayed into message history -- nemo_library mode has no concept of
+    # tool_calls (see NemoLibraryGuardrailsService's docstring and the
+    # tools-rejection check in app/api/routes/chat.py), so there's nothing
+    # to extract; treated the same as an empty message.
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     return " ".join(part.text for part in content if part.type == "text")

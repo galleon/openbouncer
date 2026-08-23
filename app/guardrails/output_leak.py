@@ -28,6 +28,15 @@ Extends OpenRouter's fixed built-in set in two ways:
 Redaction uses a category-specific placeholder (`[EMAIL]`, `[SSN]`, ...)
 rather than one generic token, again matching OpenRouter's documented
 behavior -- see redaction_token().
+
+Also scans tool-call arguments, not just `content`: a model's tool_calls
+(see app.schemas.chat.ToolCall) can just as easily regurgitate a leaked
+secret or PII into a function argument as into prose -- see
+scan_tool_calls() / scan_tool_call_argument_text() below. REDACT isn't
+supported inside tool-call arguments (splicing a redaction token into the
+middle of a JSON string risks producing invalid JSON the calling client
+can't parse) -- a REDACT-configured category matching inside a tool call
+is treated as BLOCK for that match instead, never silently as FLAG.
 """
 
 import dataclasses
@@ -45,7 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.atomic_write import atomic_write_text
 from app.core.audit import record_entry as record_audit_entry
 from app.core.distributed_lock import admin_write_lock
-from app.schemas.chat import ChatCompletionResponse, TextContentPart
+from app.schemas.chat import ChatCompletionResponse, TextContentPart, ToolCall
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "output_leak.yaml"
 CONFIG_PATH_ENV_VAR = "OPENBOUNCER_OUTPUT_LEAK_CONFIG"
@@ -98,8 +107,16 @@ class CategoryMatch:
     # Which text segment of the message this span is relative to: None for
     # a plain string `content`, else the index into a list-of-parts
     # `content`'s TextContentPart entries -- same reasoning as
-    # prompt_injection.CategoryMatch.segment.
+    # prompt_injection.CategoryMatch.segment. Meaningless (always None)
+    # when tool_call_index is set below.
     segment: int | None = None
+    # None for a match found in `content` (the normal case); the index
+    # into `tool_calls` when this match was found inside a tool call's
+    # function.arguments JSON string instead. See scan_tool_calls() /
+    # scan_tool_call_argument_text() below -- kept as a separate field
+    # rather than overloading `segment`, so a content match and a
+    # tool-call match are never ambiguous with each other.
+    tool_call_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -300,8 +317,13 @@ redact_preview = redact_text  # same shape as prompt_injection.redact_preview; k
 
 
 def scan_message_content(content, config: "OutputLeakConfig") -> list[CategoryMatch]:
-    """Scans a ResponseChatMessage.content value (str | list[ContentPart])
-    for sensitive-information matches."""
+    """Scans a ResponseChatMessage.content value (str | list[ContentPart] |
+    None) for sensitive-information matches. None for a tool-calling
+    response with no accompanying text (see ResponseChatMessage.content) --
+    nothing to scan there, see scan_tool_calls for the tool_calls half of
+    the response."""
+    if content is None:
+        return []
     if isinstance(content, str):
         return scan_text(content, config)
     matches = []
@@ -313,8 +335,26 @@ def scan_message_content(content, config: "OutputLeakConfig") -> list[CategoryMa
 
 
 def redact_message_content(content, matches: list[CategoryMatch]):
+    """Only ever redacts `content` -- a `matches` list passed in here may
+    also include tool-call-argument matches (an overall REDACT decision
+    can be driven by a content match while a *different*, lower-severity
+    FLAG match happens to sit in a tool call -- see scan_response). Those
+    are skipped, not merged into `by_segment`: a tool-call match's `span`
+    is an offset into its own arguments string, not into `content`, and
+    `segment` is left at its default (None) for both kinds of match, so
+    treating them alike here would splice the wrong spans into the wrong
+    text. Tool-call arguments are never redacted at all -- see the module
+    docstring's REDACT-inside-tool-calls paragraph."""
+    if content is None:
+        # Not reachable in practice (a None content has no matches for
+        # scan_message_content to find, so apply_action's REDACT branch --
+        # the only caller -- never has a reason to call this on one), but
+        # guarded anyway rather than relying on that invariant silently.
+        return None
     by_segment: dict[int | None, list[CategoryMatch]] = {}
     for m in matches:
+        if m.tool_call_index is not None:
+            continue
         by_segment.setdefault(m.segment, []).append(m)
 
     if isinstance(content, str):
@@ -327,12 +367,53 @@ def redact_message_content(content, matches: list[CategoryMatch]):
     return new_parts
 
 
+def _clamp_redact_to_block(matches: list[CategoryMatch]) -> list[CategoryMatch]:
+    """See the module docstring's tool-call-arguments paragraph: REDACT
+    isn't supported inside tool-call arguments, so any match that would
+    otherwise redact is escalated to BLOCK instead -- never silently
+    downgraded to FLAG, since that would let the match through unflagged."""
+    return [
+        dataclasses.replace(m, action=OutputLeakAction.BLOCK) if m.action is OutputLeakAction.REDACT else m
+        for m in matches
+    ]
+
+
+def scan_tool_call_argument_text(index: int, arguments: str, config: "OutputLeakConfig") -> list[CategoryMatch]:
+    """Scans one tool call's raw (JSON-encoded) arguments string. Used both
+    for a complete ToolCall.function.arguments (non-streaming, see
+    scan_tool_calls below) and for a streaming response's accumulated
+    per-index argument fragments (see
+    app.api.routes.chat._with_output_leak_scan), which is why this takes
+    the index and text directly rather than a ToolCall object."""
+    matches = scan_text(arguments, config)
+    matches = [dataclasses.replace(m, tool_call_index=index) for m in matches]
+    return _clamp_redact_to_block(matches)
+
+
+def scan_tool_calls(tool_calls: list[ToolCall] | None, config: "OutputLeakConfig") -> list[CategoryMatch]:
+    """Scans every tool call's function.arguments on a
+    ResponseChatMessage.tool_calls value. `index` here is each tool call's
+    position in the list, which for a *complete*, already-assembled
+    response is the same index a client would see -- unlike the streaming
+    case, where the wire index comes from each delta fragment instead (see
+    extract_stream_delta_tool_call_fragments)."""
+    if not tool_calls:
+        return []
+    matches = []
+    for i, tool_call in enumerate(tool_calls):
+        matches.extend(scan_tool_call_argument_text(i, tool_call.function.arguments, config))
+    return matches
+
+
 def scan_response(response: ChatCompletionResponse, config: "OutputLeakConfig") -> dict[int, ScanResult]:
-    """Returns choice-index -> ScanResult for every choice with >=1 match.
-    An empty dict means nothing matched -- return the response unchanged."""
+    """Returns choice-index -> ScanResult for every choice with >=1 match
+    (content matches and tool-call-argument matches combined). An empty
+    dict means nothing matched -- return the response unchanged."""
     results: dict[int, ScanResult] = {}
     for i, choice in enumerate(response.choices):
-        matches = scan_message_content(choice.message.content, config)
+        matches = scan_message_content(choice.message.content, config) + scan_tool_calls(
+            choice.message.tool_calls, config
+        )
         if not matches:
             continue
         results[i] = ScanResult(action=resolve_overall_action(matches), matches=matches)
@@ -381,33 +462,105 @@ def requires_buffering(config: "OutputLeakConfig") -> bool:
     return any(p.action in (OutputLeakAction.REDACT, OutputLeakAction.BLOCK) for p in config.custom_patterns)
 
 
-def extract_stream_delta_text(frame: str) -> str:
-    """Pulls the incremental content text out of one SSE `data: ...\\n\\n`
-    chat-completion-chunk frame (this gateway's wire format, see
-    app.guardrails.service._sse_chunk / UpstreamClient.stream_chat_completion)
-    -- used by app.api.routes.chat's output-leak stream wrapper to
-    accumulate the full response text as chunks arrive from either a
-    direct upstream or a guardrails backend, without needing to import
-    either. Returns "" for `[DONE]`, malformed frames, and frames with no
-    delta content (e.g. a trailing usage-only chunk) -- anything that
-    isn't actual bot text.
-    """
+def _parse_sse_delta(frame: str) -> dict | None:
+    """Shared parsing for extract_stream_delta_text/
+    extract_stream_delta_tool_call_fragments below: pulls choices[0].delta
+    out of one SSE `data: ...\\n\\n` chat-completion-chunk frame (this
+    gateway's wire format, see app.guardrails.service._sse_chunk /
+    UpstreamClient.stream_chat_completion). None for `[DONE]`, malformed
+    frames, and frames with no delta at all (e.g. a trailing usage-only
+    chunk)."""
     body = frame.strip()
     if not body.startswith("data:"):
-        return ""
+        return None
     payload = body[len("data:") :].strip()
     if payload == "[DONE]":
-        return ""
+        return None
     try:
         parsed = json.loads(payload)
     except (ValueError, TypeError):
-        return ""
+        return None
     choices = parsed.get("choices") if isinstance(parsed, dict) else None
     if not choices or not isinstance(choices[0], dict):
-        return ""
+        return None
     delta = choices[0].get("delta")
-    content = delta.get("content") if isinstance(delta, dict) else None
+    return delta if isinstance(delta, dict) else None
+
+
+def extract_stream_delta_text(frame: str) -> str:
+    """Pulls the incremental content text out of one SSE chunk frame --
+    used by app.api.routes.chat's output-leak stream wrapper to accumulate
+    the full response text as chunks arrive from either a direct upstream
+    or a guardrails backend, without needing to import either. Returns ""
+    for anything that isn't actual bot text (see _parse_sse_delta)."""
+    delta = _parse_sse_delta(frame)
+    if delta is None:
+        return ""
+    content = delta.get("content")
     return content if isinstance(content, str) else ""
+
+
+def accumulate_tool_call_deltas(accumulator: dict[int, dict], frame: str) -> None:
+    """Merges one SSE chunk frame's `delta.tool_calls` into `accumulator`
+    (mutated in place) -- the streaming wire format sends each tool call's
+    `id`/`type`/`function.name` once (typically on that tool call's first
+    fragment) and `function.arguments` incrementally across many
+    fragments, all tagged by that tool call's stable `index` within the
+    response (fragments for different indices can interleave across
+    chunks, and a single chunk can carry fragments for more than one index
+    at once, e.g. when the model finishes one tool call and starts the
+    next in the same chunk).
+
+    Used by app.api.routes.chat's output-leak stream wrapper for two
+    things once the stream ends: scanning each index's fully-joined
+    arguments string (see scan_tool_call_argument_text), and -- only on a
+    REDACT decision, which collapses an otherwise-streamed response into
+    one synthetic terminal chunk -- reconstructing a complete tool_calls
+    array via assembled_tool_calls() below, so that collapsing doesn't
+    silently drop tool calls the model actually made.
+    """
+    delta = _parse_sse_delta(frame)
+    if delta is None:
+        return
+    tool_calls = delta.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return
+    for entry in tool_calls:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("index")
+        if not isinstance(index, int):
+            continue
+        slot = accumulator.setdefault(index, {"id": None, "type": None, "name": None, "arguments": ""})
+        if entry.get("id"):
+            slot["id"] = entry["id"]
+        if entry.get("type"):
+            slot["type"] = entry["type"]
+        function = entry.get("function")
+        if isinstance(function, dict):
+            if function.get("name"):
+                slot["name"] = function["name"]
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                slot["arguments"] += arguments
+
+
+def assembled_tool_calls(accumulator: dict[int, dict]) -> list[dict] | None:
+    """Turns accumulate_tool_call_deltas' working accumulator into a
+    complete tool_calls list, index-ordered, in the same shape
+    ResponseChatMessage.tool_calls expects -- None if nothing was
+    accumulated (the common case: no tool calls in this response at all),
+    so callers can tell "no tool_calls field" apart from "an empty list"."""
+    if not accumulator:
+        return None
+    return [
+        {
+            "id": slot["id"],
+            "type": slot["type"] or "function",
+            "function": {"name": slot["name"], "arguments": slot["arguments"]},
+        }
+        for _, slot in sorted(accumulator.items())
+    ]
 
 
 # ---------------------------------------------------------------------------

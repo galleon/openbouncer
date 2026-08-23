@@ -30,6 +30,7 @@ from app.core.metrics import (
     PROMPT_INJECTION_ACTIONS_TOTAL,
     PROMPT_INJECTION_MATCHES_TOTAL,
     PROMPT_INJECTION_SCANNED_TOTAL,
+    TOOL_CALLS_TOTAL,
 )
 from app.core.guardrail_events import record_event as record_guardrail_event
 from app.core.registry import ModelConcurrencyLimiter, ModelRegistry, get_model_registry, resolve_api_key
@@ -37,7 +38,9 @@ from app.core.request_context import get_request_id
 from app.guardrails.output_leak import (
     OutputLeakAction,
     OutputLeakConfig,
+    accumulate_tool_call_deltas,
     apply_action as apply_output_leak_action,
+    assembled_tool_calls,
     extract_stream_delta_text,
     get_output_leak_config,
     redact_text as redact_output_leak_text,
@@ -46,6 +49,7 @@ from app.guardrails.output_leak import (
     resolve_overall_action as resolve_output_leak_action,
     scan_response as scan_output_leak_response,
     scan_text as scan_output_leak_text,
+    scan_tool_call_argument_text,
 )
 from app.guardrails.prompt_injection import (
     InjectionAction,
@@ -54,7 +58,7 @@ from app.guardrails.prompt_injection import (
     get_prompt_injection_config,
     scan_request,
 )
-from app.guardrails.service import GuardrailsService, get_guardrails_service
+from app.guardrails.service import GuardrailsService, NemoLibraryGuardrailsService, get_guardrails_service
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from app.upstream.client import UpstreamClient, get_upstream_client
 
@@ -206,6 +210,20 @@ async def _record_output_leak_matches(
     )
 
 
+def _record_tool_calls_metric(response: ChatCompletionResponse) -> None:
+    """Only measured for non-streaming responses -- see TOOL_CALLS_TOTAL's
+    own docstring in app.core.metrics for why streaming doesn't get this."""
+    if any(choice.message.tool_calls for choice in response.choices):
+        TOOL_CALLS_TOTAL.labels(model=response.model).inc()
+
+
+def _scan_accumulated_tool_calls(accumulator: dict[int, dict], ol_config: OutputLeakConfig) -> list:
+    matches = []
+    for index, slot in accumulator.items():
+        matches.extend(scan_tool_call_argument_text(index, slot["arguments"], ol_config))
+    return matches
+
+
 async def _with_output_leak_scan(
     agen: AsyncIterator[str],
     ol_config: OutputLeakConfig,
@@ -216,7 +234,10 @@ async def _with_output_leak_scan(
 ) -> AsyncIterator[str]:
     """Wraps a raw SSE chat-completion-chunk stream (from either a direct
     upstream or a guardrails backend -- same contract either way, see
-    GuardrailsService's docstring) with output-leak scanning.
+    GuardrailsService's docstring) with output-leak scanning -- of both
+    `content` and any streamed tool_calls' function.arguments (accumulated
+    across chunks via app.guardrails.output_leak.accumulate_tool_call_deltas,
+    see that function's docstring for why).
 
     Streaming BLOCK/REDACT decisions can only be made after the fact
     (unlike the prompt-injection pre-filter's real HTTP error), because
@@ -242,20 +263,26 @@ async def _with_output_leak_scan(
 
     if not output_leak_requires_buffering(ol_config):
         accumulated: list[str] = []
+        tool_call_accumulator: dict[int, dict] = {}
         async for chunk in agen:
             accumulated.append(extract_stream_delta_text(chunk))
+            accumulate_tool_call_deltas(tool_call_accumulator, chunk)
             yield chunk
-        matches = scan_output_leak_text("".join(accumulated), ol_config)
+        matches = scan_output_leak_text("".join(accumulated), ol_config) + _scan_accumulated_tool_calls(
+            tool_call_accumulator, ol_config
+        )
         await _record_output_leak_matches(
             matches, key_id=key_id, model=model, action=resolve_output_leak_action(matches), streaming=True
         )
         return
 
     buffered: list[str] = []
+    tool_call_accumulator: dict[int, dict] = {}
     async for chunk in agen:
         buffered.append(chunk)
+        accumulate_tool_call_deltas(tool_call_accumulator, chunk)
     text = "".join(extract_stream_delta_text(c) for c in buffered)
-    matches = scan_output_leak_text(text, ol_config)
+    matches = scan_output_leak_text(text, ol_config) + _scan_accumulated_tool_calls(tool_call_accumulator, ol_config)
     action = resolve_output_leak_action(matches)
 
     if action is OutputLeakAction.BLOCK:
@@ -274,10 +301,24 @@ async def _with_output_leak_scan(
 
     if action is OutputLeakAction.REDACT:
         await _record_output_leak_matches(matches, key_id=key_id, model=model, action=action, streaming=True)
-        redacted_text = redact_output_leak_text(text, matches)
+        # Only `content` matches are ever redacted (see
+        # app.guardrails.output_leak.redact_message_content's docstring --
+        # its non-streaming twin) -- a tool-call match's span is an offset
+        # into that tool call's own arguments string, not into `text`.
+        redacted_text = redact_output_leak_text(text, [m for m in matches if m.tool_call_index is None])
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
-        yield _sse_chunk(response_id, created, model, delta={"content": redacted_text})
+        delta: dict = {"content": redacted_text}
+        # Collapsing the stream into one synthetic chunk must not silently
+        # drop tool_calls the model actually made -- reconstruct them from
+        # the accumulator (unredacted: a REDACT-configured category
+        # matching inside tool-call arguments was already escalated to
+        # BLOCK at scan time, see scan_tool_call_argument_text, so nothing
+        # reaching here needs redacting).
+        tool_calls = assembled_tool_calls(tool_call_accumulator)
+        if tool_calls:
+            delta["tool_calls"] = tool_calls
+        yield _sse_chunk(response_id, created, model, delta=delta)
         yield _sse_chunk(response_id, created, model, delta={}, finish_reason="stop")
         yield "data: [DONE]\n\n"
         return
@@ -377,6 +418,21 @@ async def create_chat_completion(
                 code="model_does_not_support_chat",
             )
         ensure_sovereignty_allowed(auth, entry)
+        if request.tools and _guardrails_requested(request) and isinstance(guardrails, NemoLibraryGuardrailsService):
+            # nemo_library mode reduces every message to plain {role, text}
+            # before handing it to nemoguardrails (see
+            # app.guardrails.service._to_nemo_messages) -- there's no
+            # concept of tool_calls in that path at all, so reject up
+            # front rather than silently dropping `tools` and leaving the
+            # caller wondering why the model never calls anything.
+            raise OpenAIError(
+                "Tool-calling isn't supported when GUARDRAILS_MODE=nemo_library and "
+                "guardrails are requested for this call -- omit `tools`, or set "
+                "`guardrails.enabled: false` on the request.",
+                status_code=400,
+                param="tools",
+                code="tool_calling_not_supported_in_nemo_library_mode",
+            )
         if pi_config.enabled:
             PROMPT_INJECTION_SCANNED_TOTAL.inc()
             pi_results = scan_request(request, pi_config)
@@ -562,6 +618,7 @@ async def create_chat_completion(
             guardrails_response = await _apply_output_leak_guardrail(
                 guardrails_response, ol_config, key_id=auth.key_id, alert_tracker=alert_tracker
             )
+            _record_tool_calls_metric(guardrails_response)
             _record_completion("200")
             return guardrails_response
 
@@ -597,6 +654,7 @@ async def create_chat_completion(
         response = await _apply_output_leak_guardrail(
             response, ol_config, key_id=auth.key_id, alert_tracker=alert_tracker
         )
+        _record_tool_calls_metric(response)
         _record_completion("200")
         return response
     except OpenAIError as exc:

@@ -1,6 +1,64 @@
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class FunctionDefinition(BaseModel):
+    """One entry of a request's `tools` list -- the client-declared
+    signature of a function the model may choose to call. `parameters` is
+    an arbitrary JSON Schema object (its own internal shape isn't this
+    gateway's concern to validate); OpenBouncer relays it upstream
+    unmodified, the same as every other pass-through request field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str | None = None
+    parameters: dict | None = None
+
+
+class Tool(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"]
+    function: FunctionDefinition
+
+
+class ToolChoiceFunctionName(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class NamedToolChoice(BaseModel):
+    """The object form of `tool_choice` -- forces the model to call one
+    specific, named function, as opposed to the string forms ("auto" /
+    "none" / "required")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"]
+    function: ToolChoiceFunctionName
+
+
+class FunctionCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    # A JSON-encoded string (the model's own serialization, not yet
+    # parsed/validated against `parameters`) -- matches the wire format
+    # OpenAI-compatible upstreams actually send. Parsing/validating it is
+    # the calling client's responsibility, same as OpenAI's own contract;
+    # OpenBouncer relays it as opaque text.
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["function"]
+    function: FunctionCall
 
 
 class ImageURL(BaseModel):
@@ -31,7 +89,30 @@ class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | list[ContentPart]
+    # None only for an assistant message that's *entirely* a tool call
+    # (matches the real OpenAI-compatible wire format for replaying prior
+    # tool-calling turns back into message history: `content: null,
+    # tool_calls: [...]`) -- see _validate_tool_calling_fields below, which
+    # still requires content for every other role.
+    content: str | list[ContentPart] | None = None
+    # Only ever set on an assistant message (a model's own prior turn that
+    # chose to call one or more tools) -- see _validate_tool_calling_fields.
+    tool_calls: list[ToolCall] | None = None
+    # Set when this message is a tool's result being fed back to the model
+    # (role="tool"), correlating it to the ToolCall.id it's answering.
+    # Deliberately not required/validated against role="tool" here --
+    # OpenBouncer has always accepted bare role="tool" messages without it
+    # (pre-dating tool-calling support in this schema), so this stays
+    # permissive rather than retroactively tightening that.
+    tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_calling_fields(self) -> "ChatMessage":
+        if self.tool_calls is not None and self.role != "assistant":
+            raise ValueError("tool_calls is only valid on assistant messages")
+        if self.content is None and self.role != "assistant":
+            raise ValueError(f"content is required for {self.role!r} messages")
+        return self
 
 
 class ResponseChatMessage(BaseModel):
@@ -39,13 +120,19 @@ class ResponseChatMessage(BaseModel):
     ChatMessage (used to validate client *requests*), this deliberately
     has no extra="forbid": real upstream providers routinely include
     vendor extension fields on response messages (e.g. vLLM's
-    `reasoning`, `tool_calls`, `refusal`) that this gateway doesn't define
-    or use, and rejecting the whole response over fields we don't care
-    about would be wrong.
+    `reasoning`, `refusal`) that this gateway doesn't define or use, and
+    rejecting the whole response over fields we don't care about would be
+    wrong.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | list[ContentPart]
+    # None when the response is entirely a tool call -- see ChatMessage's
+    # matching field. No validator here (unlike ChatMessage): this model
+    # validates upstream *output*, which this gateway doesn't get to
+    # reject just because some other field looks inconsistent -- see the
+    # class docstring.
+    content: str | list[ContentPart] | None = None
+    tool_calls: list[ToolCall] | None = None
 
 
 class GuardrailsOptions(BaseModel):
@@ -88,6 +175,8 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     user: str | None = None
     guardrails: GuardrailsOptions | None = None
+    tools: list[Tool] | None = None
+    tool_choice: Literal["none", "auto", "required"] | NamedToolChoice | None = None
 
 
 class ChatCompletionChoice(BaseModel):

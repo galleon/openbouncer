@@ -333,7 +333,14 @@ def scan_message(text: str, config: "PromptInjectionConfig") -> list[CategoryMat
 
 def _text_segments(message: ChatMessage) -> list[tuple[int | None, str]]:
     """(segment, text) pairs -- segment is None for a plain string
-    `content`, else the part's index in a list-of-parts `content`."""
+    `content`, else the part's index in a list-of-parts `content`. Empty
+    for a tool-calling assistant turn with content=None (its tool_calls
+    aren't text this scanner covers -- see app.guardrails.output_leak's
+    equivalent extension for the response side; this module's request-side
+    equivalent isn't in scope yet, tool_calls here are the *model's own*
+    prior choice being replayed back to it, not new adversarial input)."""
+    if message.content is None:
+        return []
     if isinstance(message.content, str):
         return [(None, message.content)]
     return [(i, part.text) for i, part in enumerate(message.content) if isinstance(part, TextContentPart)]

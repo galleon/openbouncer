@@ -35,6 +35,14 @@ CHAT_COMPLETION_DURATION_SECONDS = Histogram(
     ["model", "guardrails"],
 )
 
+TOOL_CALLS_TOTAL = Counter(
+    "openbouncer_tool_calls_total",
+    "Non-streaming chat completion responses containing at least one tool call, by model. Not "
+    "measured for streaming responses (see app/api/routes/chat.py) to avoid adding per-chunk "
+    "parsing overhead to every streamed response regardless of whether anything needs it.",
+    ["model"],
+)
+
 GUARDRAILS_REQUESTS_TOTAL = Counter(
     "openbouncer_guardrails_requests_total",
     "Requests processed by a guardrails config_id.",

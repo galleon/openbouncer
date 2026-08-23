@@ -673,6 +673,9 @@ mint/delete keys or rewrite guardrails/prompt-injection policy.
   requests. Admin-defined `custom_patterns` matches are grouped under
   `category="custom"` rather than their own name, for the same
   cardinality reason `app/core/metrics.py` documents elsewhere.
+- `openbouncer_tool_calls_total{model}` -- non-streaming
+  [tool-calling](#tool-calling) responses containing at least one tool
+  call. Not measured for streaming responses.
 - `openbouncer_alerts_triggered_total{guardrail}` /
   `openbouncer_alert_webhook_failures_total` -- [Alerting](#alerting):
   burst-block alerts fired (by which guardrail's blocks crossed the
@@ -1163,6 +1166,9 @@ every guardrails config, rather than surfacing that as an error.
   plain text; any `image_url` content parts in a request are dropped when
   talking to it. `nemo_microservice` mode and guardrails-disabled requests
   are unaffected.
+- **No tool-calling.** Same "text only" limitation applies to `tools`/
+  `tool_calls` -- see [Tool-calling](#tool-calling). A request with `tools`
+  set gets a clean `400` rather than having them silently dropped.
 - **System messages.** nemoguardrails does not yet support a `system` role
   message (per its own `LLMRails.generate_async` docstring). OpenBouncer
   passes such messages through unchanged rather than guessing a mapping.
@@ -1362,3 +1368,82 @@ curl -s http://localhost:8000/v1/chat/completions \
 # with the "email" category set to "block":
 # => 403 {"error": {"message": "...", "type": "permission_error", "code": "output_leak_detected", "param": null}}
 ```
+
+## Tool-calling
+
+OpenAI's `tools`/`tool_choice` request fields, and the resulting
+`tool_calls` on a response message, are forwarded like any other request
+field -- `disabled` and `nemo_microservice` guardrails modes both build
+their upstream payload via a plain `model_dump()`, so a `tools`-bearing
+request already carries through unmodified once the schema accepts it (see
+`app/schemas/chat.py`'s `Tool`/`ToolCall`/`FunctionCall` models). OpenBouncer
+never executes a tool itself -- it's a proxy, not an agent runtime; tool
+execution, and feeding the result back as a `role: "tool"` message, stays
+entirely the calling client's responsibility, same as talking to OpenAI
+directly.
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "local/gemma4-nvfp4",
+    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+      }
+    }]
+  }'
+# => {"choices": [{"message": {"role": "assistant", "content": null,
+#      "tool_calls": [{"id": "call_...", "type": "function",
+#      "function": {"name": "get_weather", "arguments": "{\"location\": \"Paris\"}"}}]},
+#      "finish_reason": "tool_calls"}], ...}
+```
+
+**Not supported in `nemo_library` mode.** `NemoLibraryGuardrailsService`
+reduces every message to plain `{role, text}` before handing it to
+nemoguardrails (Colang/dialog rails have no concept of tool calls at all --
+same limitation as [image content](#other-nemo_library-limitations), which
+that mode also drops). A request that sets `tools` while guardrails are
+requested for that
+call and `GUARDRAILS_MODE=nemo_library` is active gets a clean `400
+tool_calling_not_supported_in_nemo_library_mode` rather than silently
+having `tools` dropped and the model never calling anything. `disabled` and
+`nemo_microservice` are unaffected; setting `guardrails.enabled: false` on
+the request also sidesteps this (it bypasses the guardrails backend
+entirely, same as any other request).
+
+**The prompt-injection and output-leak guardrails both cover tool-calling
+content, not just `content`.** A model regurgitating a leaked secret or PII
+into a function argument is exactly as real a risk as regurgitating it into
+prose, so the output-leak guardrail scans every `tool_calls[].function.arguments`
+string the same way it scans response text -- streaming included, where
+arguments arrive as incremental fragments tagged by index and are
+accumulated across chunks before scanning (see
+`app.guardrails.output_leak.accumulate_tool_call_deltas`). One thing is
+deliberately different for a match found inside tool-call arguments:
+**`redact` isn't supported there** -- splicing a redaction token into the
+middle of a JSON string risks producing invalid JSON the calling client
+can't parse -- so a `redact`-configured category matching inside a tool
+call's arguments is escalated to `block` for that match instead, never
+silently downgraded to `flag`. A streaming `redact` decision driven by a
+*different*, clean match in `content` still collapses the response into one
+synthetic chunk the same way it already did (see [Non-streaming vs.
+streaming](#non-streaming-vs-streaming) above) -- and that reconstruction
+includes any tool_calls the model actually made, so collapsing the stream
+never silently drops them.
+
+Prompt-injection scanning already covered a tool result being fed back to
+the model (a `role: "tool"` message's `content`) before this feature
+existed, when `scope: all_messages` is configured -- no separate extension
+was needed there. It does not scan the *model's own* `tool_calls` on an
+assistant message (that's the model's prior choice being replayed back to
+it, not new adversarial input).
+
+`openbouncer_tool_calls_total{model="..."}` (see [Metrics](#metrics))
+counts non-streaming responses containing at least one tool call. Not
+measured for streaming responses, to avoid adding per-chunk parsing
+overhead to every streamed response regardless of whether anything needs
+it.
