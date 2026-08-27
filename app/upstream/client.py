@@ -15,7 +15,15 @@ ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_SECONDS = 30.0
+# 30s was too tight for vision/long-generation chat completions against a
+# local vLLM backend under concurrent load: a real request generating a
+# ~1,000-token Markdown table transcription took 61s uncontended, and each
+# retry restarts generation from scratch rather than resuming, so a 30s
+# budget could never let this class of request succeed once concurrent load
+# (multiple completions sharing one GPU) pushed generation past it --
+# confirmed live via LKSA's Smart Image Annotation feature, which lost 2
+# images permanently to this after 9 consecutive same-image timeouts.
+DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_BACKOFF_SECONDS = 0.5
 
