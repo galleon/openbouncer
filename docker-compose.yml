@@ -179,6 +179,26 @@ services:
   # note above). Adjust --quantization (or drop it to rely on autodetection
   # from the checkpoint's quant config) to match what your installed vLLM
   # version expects.
+  #
+  # --enable-auto-tool-choice + --tool-call-parser gemma4: without these,
+  # any OpenAI-style client requesting tool_choice="auto" (e.g. LKSA's
+  # deep_research/deep_thinking flows, via langchain's
+  # create_tool_calling_agent) gets a 400 "'auto' tool choice requires
+  # --enable-auto-tool-choice and --tool-call-parser to be set" -- confirmed
+  # live against lksa-arm64-rebuild's deep_research flow. `gemma4` is a
+  # purpose-built parser for this exact model family, shipped in this vLLM
+  # build (`vllm serve --help` lists it alongside e.g. hermes/mistral/
+  # llama3_json) -- not a generic fallback.
+  #
+  # --reasoning-parser gemma4 (openbouncer#2): this is a *separate* vLLM
+  # feature from --tool-call-parser above, even though they share a name --
+  # having one does not imply the other. Gemma4 is a thinking model that
+  # emits `<|channel>thought\n...<channel|>` around its chain-of-thought
+  # before the real answer; without a reasoning parser active, that raw
+  # tagged text leaks straight into `content` instead of being split into
+  # `reasoning_content` -- confirmed live via mltb#50/mltb#45. `gemma4` is
+  # vLLM's purpose-built parser for this exact tag format
+  # (vllm.reasoning.gemma4_reasoning_parser.Gemma4ReasoningParser).
   vllm-gemma4:
     image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:26.06-py3}
     profiles: ["vllm"]
@@ -188,6 +208,9 @@ services:
       --quantization modelopt
       --port 8000
       --gpu-memory-utilization 0.5
+      --enable-auto-tool-choice
+      --tool-call-parser gemma4
+      --reasoning-parser gemma4
     ports:
       # Loopback-only -- same reasoning as vllm-bge-m3 above.
       - "127.0.0.1:8002:8000"
